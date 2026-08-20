@@ -4,6 +4,8 @@
     uv run python -m ff_agent.cli ingest      # pull/refresh nflverse 2016-2025
     uv run python -m ff_agent.cli byes        # bye table + §2.1 free-bye teams
     uv run python -m ff_agent.cli crosswalk   # resolve the ESPN pool, assert, report
+    uv run python -m ff_agent.cli score       # M2 GATE — scores vs ESPN
+    uv run python -m ff_agent.cli settings    # refresh league settings JSON
     uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
     uv run python -m ff_agent.cli offline     # prove the offline path works
 """
@@ -145,6 +147,63 @@ def cmd_crosswalk(_) -> int:
     return 0 if ok else 1
 
 
+def cmd_score(args) -> int:
+    """Milestone 2 gate: recomputed scores vs ESPN's recorded scores."""
+    from ff_agent.scoring import validate as sv
+    from ff_agent.scoring.rules import SPEC_SEASONS, load_rules
+
+    season = args.season or LAST_SEASON
+    rules = load_rules(season)
+    print(f"season {season}: {len(rules)} scoring rules loaded"
+          + ("  (matches §1)" if season in SPEC_SEASONS else "  (historical ruleset)"))
+    if season not in SPEC_SEASONS:
+        extra = {k: rules[k] for k in ("PC", "INC") if k in rules}
+        if extra:
+            print(f"  NOTE: this season also scored {extra} — removed for 2025+.")
+
+    a = sv.layer_a_rules_check(season)
+    a_bad = a.filter(pl.col("delta").abs() > sv.TOLERANCE)
+    print(f"\nLAYER A  our rules on ESPN's own stat line "
+          f"{a.height - a_bad.height}/{a.height} "
+          f"({round(100 * (a.height - a_bad.height) / a.height, 3)}%)")
+    if a_bad.height:
+        with WIDE:
+            print(a_bad.head(10))
+
+    rep = sv.report(season)
+    total = rep["players"]["rows"] + rep["dst"]["rows"]
+    mism = rep["players"]["mismatches"] + rep["dst"]["mismatches"]
+    print(f"\nLAYER B  our scores from nflverse vs ESPN")
+    for k in ("players", "dst"):
+        st = rep[k]
+        print(f"  {st['label']:8} {st['rows'] - st['mismatches']:>5}/{st['rows']:<5} "
+              f"exact  ({st['exact_pct']}%)")
+    print(f"  {'TOTAL':8} {total - mism:>5}/{total:<5} exact "
+          f"({round(100 * (total - mism) / total, 3)}%)")
+
+    for key, label in (("player_categories", "players"), ("dst_categories", "dst")):
+        cd = rep[key]
+        if cd.height:
+            print(f"\nLAYER C  which rule disagrees ({label}):")
+            with WIDE:
+                print(cd.group_by("rule").agg(
+                    pl.len().alias("rows"),
+                    pl.col("diff").abs().sum().round(2).alias("abs_pts"),
+                ).sort("rows", descending=True))
+
+    if mism:
+        print(f"\n{mism} row(s) differ — see reports/scoring_mismatch_*_{season}.csv")
+    return 0 if a_bad.height == 0 else 1
+
+
+def cmd_settings(args) -> int:
+    from ff_agent.data import espn
+
+    d = espn.settings_dump(args.season or SEASON)
+    print(f"wrote {d.get('_written_to')}")
+    return 0
+
+
 def cmd_verify(_) -> int:
     from ff_agent.data import espn
 
@@ -196,6 +255,8 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_ingest)
     sub.add_parser("byes").set_defaults(fn=cmd_byes)
     sub.add_parser("crosswalk").set_defaults(fn=cmd_crosswalk)
+    p = sub.add_parser("score"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_score)
+    p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)
     args = ap.parse_args(argv)

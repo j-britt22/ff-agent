@@ -87,16 +87,29 @@ Defined in `.claude/agents/`. Use them rather than doing this work inline:
 
 **M1 (data layer + ID crosswalk) — COMPLETE, gate closed 2026-08-20.**
 Zero unmatched across all five populations: 2026 draftable pool (995 players +
-32 D/ST), 2025 rosters (127+10), and the 2023/2024/2025 drafts. 105 tests pass.
-**Next: M2, the scoring engine.**
+32 D/ST), 2025 rosters (127+10), and the 2023/2024/2025 drafts.
+
+**M2 (scoring engine) — COMPLETE 2026-08-20.** 140 tests pass.
+- **Layer A (the hard gate): 100% on 2023, 2024 AND 2025** — our rules applied to
+  ESPN's own stat line reproduce ESPN's total exactly, across *two* rulesets.
+  A single failure here means a scoring rule is wrong.
+- **Layer B (end to end, nflverse -> points): 6048/6052 = 99.93%.**
+  2023 is perfect (1821/1821); 2024 and 2025 each have 2 rows where nflverse and
+  ESPN disagree about a *stat value*, not a rule. All four are pinned by name in
+  `tests/test_scoring_gate.py` so a NEW disagreement fails the suite.
+- **Layer C** attributes any mismatch to a specific rule rather than a bare total.
+
+**Next: M3, the projection model.**
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
 uv run python -m ff_agent.cli byes        # §2.1 free-bye teams
 uv run python -m ff_agent.cli crosswalk   # THE GATE — needs .env
+uv run python -m ff_agent.cli score       # M2 GATE — recomputed scores vs ESPN
+uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 105 pass
+uv run pytest                             # 140 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -105,7 +118,42 @@ Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
 `data/crosswalk.py` (§0.2 gate) · `overrides/player_id_overrides.csv` (tracked —
 human decisions belong in git).
 
-**Findings worth remembering:**
+**Scoring rules are LOADED from ESPN, not hardcoded** (`ff_agent/scoring/rules.py`).
+§1 is demoted to an assertion against what was loaded, so a transcription slip
+cannot corrupt the engine and a mid-season settings change fails loudly.
+
+**M2 findings — every one of these silently breaks a generic implementation:**
+- **The league changed its scoring after 2024.** 2023 and 2024 also scored `PC`
+  (0.25/completion) and `INC` (-0.1/incompletion); both removed for 2025. So
+  **only 2025 is a valid exact-match target**, and ESPN's *recorded* historical
+  points are not comparable across that boundary. Recomputing from stat lines
+  under current rules — what this engine does, per §7.2 step 2 — is the fix.
+- **D/ST yards allowed = opponent `passing_yards + sack_yards_lost + rushing_yards`.**
+  `sack_yards_lost` is stored NEGATIVE, so it ADDS. Gross passing+rushing is
+  wrong. Exact on 119/119 team-weeks.
+- **D/ST points allowed excludes only what MY OFFENSE conceded** on a scrimmage
+  play — pick-sixes, strip-sack returns, offensive safeties. Points scored
+  against my SPECIAL TEAMS still count as allowed (kickoff-recovery TDs,
+  blocked-FG returns, a punter tackled in his own end zone), because the fantasy
+  D/ST is defense *and* special teams. Using the opponent's final score is wrong;
+  so is excluding every non-offensive TD. Each is off on 8 of 119, on different rows.
+- A punt/FG snap that becomes a run or pass is typed `run`/`pass` by nflverse with
+  every special-teams flag at 0 — the `(Punt formation)` tag in `desc` is the only
+  signal. 17 such plays conceded points across 2016-2025.
+- **Blocked field goals count as misses** under §1's flat -1. nflverse tracks
+  blocks separately: `fg_missed` alone is 109/113, `fg_missed + fg_blocked` 113/113.
+- **D/ST touchdowns span three nflverse columns** — `def_tds` +
+  `fumble_recovery_tds` + `special_teams_tds`. `def_tds` alone misses 11 of 135.
+- **D/ST fumble recoveries are `fumble_recovery_opp`**, not `def_fumbles` (which
+  matches neither direction). Sacks come from **counting pbp sack plays**, not
+  `team_stats.def_sacks`, which aggregates fractional player credits and drops one.
+- nflverse spells the Rams **`LA`**; ESPN and the crosswalk use `LAR`.
+- **Never store a dict column in parquet.** polars infers struct fields from a
+  sample, so categories appearing only in later rows vanish — this silently
+  understated every D/ST touchdown until the totals disagreed. Fixed columns or
+  a JSON string.
+
+**M1 findings worth remembering:**
 - Sacks taken is **`sacks_suffered`**. Not `sacks` (doesn't exist), and NOT
   `def_sacks` (that is sacks *recorded by* a defender). Rushing attempts is
   **`carries`**; `attempts` is PASS attempts. Both are §1 scoring categories, so
