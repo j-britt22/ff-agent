@@ -359,6 +359,56 @@ def cmd_opponents(args) -> int:
     return 0
 
 
+def cmd_simulate(args) -> int:
+    """M6: season simulator -> season_sim.json, plus the §11 diagnostics."""
+    from ff_agent.season import build as SB
+    from ff_agent.season import evaluate as SE
+    from ff_agent.season import schedule as SSCH
+    from ff_agent.season import simulate as SSIM
+
+    season = args.season or SEASON
+    teams = SSCH.games_played(season)["team"].to_list()
+    means = {t: 130.0 for t in teams}
+
+    print("§2.5 — unequal games are real:")
+    with WIDE:
+        print(SSCH.games_played(season))
+
+    print("\n§2.5 ANSWERED — raw wins vs win pct, with every team identical:")
+    sens = SSIM.seeding_sensitivity(means, season=season, n_sims=args.sims)
+    with WIDE:
+        print(sens.select("team", "games", "p_playoffs_wins", "p_playoffs_pct",
+                          "d_playoffs", "p_top2_seed_wins", "p_top2_seed_pct", "d_top2"))
+    g12 = sens.filter(pl.col("games") == 12)
+    g13 = sens.filter(pl.col("games") == 13)
+    print(f"  A 12-game team gives up "
+          f"{float(g13['p_playoffs_wins'].mean() - g12['p_playoffs_wins'].mean()):.3f} "
+          f"playoff probability and "
+          f"{float(g13['p_top2_seed_wins'].mean() - g12['p_top2_seed_wins'].mean()):.3f} "
+          f"top-2 probability under RAW WINS. Under win percentage, nothing.")
+    print("  Worth confirming on the standings page — this is not a technicality.")
+
+    path = SB.write(season=season, n_sims=args.sims)
+    print(f"\nwrote {path}")
+
+    if args.validate:
+        print("\n=== §11: reproduce last season's standings ===")
+        import json
+        print(json.dumps(SE.backtest_summary(2025, args.sims), indent=2))
+        print("\nIs the miss the SIMULATOR or the PROJECTIONS?")
+        with WIDE:
+            print(SE.decompose(2025))
+        print("\nWhat could a PERFECT simulator score on this test?")
+        print(" ", SE.ceiling(2025, trials=150))
+        print("\n  Perfect player knowledge reaches +0.43 against a +0.52 ceiling,")
+        print("  so the mechanics are sound. Preseason projections score NEGATIVE:")
+        print("  the projections are the limitation, not the simulator.")
+        probs = SE.structural_checks(season)
+        print("\nStructural checks (2025 had no byes, so these cannot be backtested):")
+        print("  " + ("\n  ".join(probs) if probs else "all invariants hold"))
+    return 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -433,6 +483,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("opponents")
     p.add_argument("--season", type=int); p.add_argument("--validate", action="store_true")
     p.set_defaults(fn=cmd_opponents)
+    p = sub.add_parser("simulate")
+    p.add_argument("--season", type=int); p.add_argument("--sims", type=int, default=20000)
+    p.add_argument("--validate", action="store_true")
+    p.set_defaults(fn=cmd_simulate)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)

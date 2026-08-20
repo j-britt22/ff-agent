@@ -148,7 +148,11 @@ Gate passes: fit on 2023–24, predict 2025, against **superflex** ADP (standard
 would be a straw man — §7.5 rules it out). mean log-prob −4.942 → −4.890,
 top-1 accuracy **3.1% → 6.3%**, top-5 21.9% → 27.3%.
 
-**Next: M6 (season simulator → `season_sim.json`).**
+**M6 (season simulator → `season_sim.json`) — COMPLETE 2026-08-20.** 221 tests pass.
+Mechanics verified; the §11 standings test does **not** pass cleanly, and the
+diagnosis is recorded rather than tuned away.
+
+**Next: M7 (Monte Carlo draft simulator), then M8 (nine slot plans).**
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
@@ -160,10 +164,11 @@ uv run python -m ff_agent.cli project --backtest   # M3 GATE — walk-forward
 uv run python -m ff_agent.cli xfp --validate      # M3b — xFP + validity tests
 uv run python -m ff_agent.cli board       # M4 — VOR/tiers/byes -> board.json
 uv run python -m ff_agent.cli opponents --validate  # M5 — opponents.json + gate
+uv run python -m ff_agent.cli simulate --validate   # M6 — season_sim.json
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 206 pass
+uv run pytest                             # 221 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -234,6 +239,31 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+
+**M6 findings:**
+- **§2.5 ANSWERED, and it is not a technicality.** 2026: five teams play 12 games
+  (you, JJett, Gibbs, Clearing, leah), four play 13. With every team identical,
+  seeding on **raw wins** costs a 12-game team **−7.9 pts of P(playoffs)** and
+  **−8.1 pts of P(top-2 seed)** versus win percentage. Under win percentage the
+  gap vanishes. **Confirm the rule on the standings page** — it is worth ~8 points
+  of the thing §2.4 calls as valuable as everything else combined. The simulator
+  ships BOTH rules and reports the delta.
+- **`first_round_byes = 2` is now OBSERVED, not inferred** — the top two seeds
+  (Unsolicited Dak Pics, Personality Hires) both sat out week 15 of the real 2025
+  bracket.
+- **Weekly noise is ~3x the talent spread**: within-team weekly sd **25.7**,
+  between-team season-mean sd **8.7** (measured on 2025's 112 team-weeks). Over 12
+  games, H2H results are luck-dominated. This is *why* §2.4's "variance is good,
+  marginal wins are cheap" holds — it is now measured, not asserted.
+- **The §11 standings test does not pass cleanly, and the cause is identified.**
+  Simulating 2025 from opening-day rosters gives Spearman **−0.21** vs actual
+  standings. But: a **perfect** simulator scores only **+0.52** on this test
+  (5th pct −0.05), and the same simulator fed **perfect player knowledge** on the
+  same rosters scores **+0.43**. So the mechanics are sound and **the preseason
+  projections are the limitation**. Roster churn is NOT the culprit — 81% of 2025
+  starter points came from drafted players.
+- 2025 had **no regular-season byes** (8 teams, all 14 games), so bye and
+  unequal-game handling **cannot be backtested** — it is verified as invariants.
 
 **M5 findings — the league changed shape underneath itself:**
 - **2023 and 2024 were ONE-QB leagues. Only 2025 was 2-QB.** First QB off the
