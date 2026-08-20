@@ -320,6 +320,45 @@ def cmd_board(args) -> int:
     return 1 if alarms else 0
 
 
+def cmd_opponents(args) -> int:
+    """M5: per-manager tendencies -> opponents.json, plus the §11 gate."""
+    from ff_agent.opponents import build as OB
+    from ff_agent.opponents import evaluate as OE
+    from ff_agent.opponents import history as OH
+    from ff_agent.opponents import tendencies as OT
+
+    path = OB.write(args.season or SEASON)
+    print(f"wrote {path}\n")
+
+    print("THE CONSTRAINT — 2023 and 2024 were ONE-QB leagues; only 2025 was 2-QB:")
+    with WIDE:
+        print(OH.format_shift_evidence())
+    print("\nEvidence per manager (§2.3 weights the 2x managers most; "
+          "they are not the ones with the most data):")
+    with WIDE:
+        print(OH.manager_coverage().select(
+            "manager", "faced_twice", "n_drafts", "n_picks",
+            "n_drafts_two_qb", "qb_confidence"))
+
+    print("\nWhen each manager takes his first QB (2-QB seasons only):")
+    with WIDE:
+        print(OT.qb_timing())
+
+    if args.validate:
+        print("\n=== §11 GATE: fit 2023-24, predict 2025, vs superflex ADP ===")
+        with WIDE:
+            print(OE.strict_holdout(2025))
+        print("\nPer-manager — where does the gain come from?")
+        b = OE.per_manager_breakdown(2025)
+        with WIDE:
+            print(b)
+        print(f"  mean gain {b['gain'].mean():+.4f}; "
+              f"{b.filter(pl.col('gain') > 0).height}/{b.height} managers improved")
+        print("  Negative entries are real: a manager's 1-QB history can mispredict")
+        print("  his 2-QB behaviour. Hence the 3x weight on the format-matched season.")
+    return 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -391,6 +430,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("board")
     p.add_argument("--season", type=int); p.add_argument("--top", type=int, default=25)
     p.set_defaults(fn=cmd_board)
+    p = sub.add_parser("opponents")
+    p.add_argument("--season", type=int); p.add_argument("--validate", action="store_true")
+    p.set_defaults(fn=cmd_opponents)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)

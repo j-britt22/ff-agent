@@ -52,3 +52,6 @@ logs/
 
 # ─── Working reports (regenerated; not source) ───────────────────────────────
 reports/
+
+# M5 artifact
+artifacts/opponents.json

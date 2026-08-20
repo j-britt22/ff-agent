@@ -143,7 +143,12 @@ But three sub-findings are worth more than the headline would have been:
 and prints the §11 review: divergences with attributed reasons, bye lift, the
 QB-count decision, and §10's sanity alarms.
 
-**Next: M5 (opponent model → `opponents.json`).**
+**M5 (opponent model → `opponents.json`) — COMPLETE 2026-08-20.** 206 tests pass.
+Gate passes: fit on 2023–24, predict 2025, against **superflex** ADP (standard
+would be a straw man — §7.5 rules it out). mean log-prob −4.942 → −4.890,
+top-1 accuracy **3.1% → 6.3%**, top-5 21.9% → 27.3%.
+
+**Next: M6 (season simulator → `season_sim.json`).**
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
@@ -154,10 +159,11 @@ uv run python -m ff_agent.cli project     # M3 — build projections for the sea
 uv run python -m ff_agent.cli project --backtest   # M3 GATE — walk-forward
 uv run python -m ff_agent.cli xfp --validate      # M3b — xFP + validity tests
 uv run python -m ff_agent.cli board       # M4 — VOR/tiers/byes -> board.json
+uv run python -m ff_agent.cli opponents --validate  # M5 — opponents.json + gate
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 192 pass
+uv run pytest                             # 206 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -228,6 +234,33 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+
+**M5 findings — the league changed shape underneath itself:**
+- **2023 and 2024 were ONE-QB leagues. Only 2025 was 2-QB.** First QB off the
+  board: pick **16**, then **35**, then **7**. QBs in the first three rounds:
+  2, 0, **5**. Pre-2025 QB behaviour is not thin evidence, it is evidence about a
+  different game. Combined with the M2 scoring change, **2025 is the only season
+  resembling 2026** — and it was 8 teams.
+- Team counts ran **8, 10, 8, now 9** — a size this league has never played. All
+  pick numbers are normalised to a fraction of the draft.
+- **Kylie Leahy — faced TWICE — has one draft (17 picks).** leah gottlieb has one,
+  and it is 2024, so she has **zero** 2-QB evidence. §2.3 weights the four
+  double-up managers most heavily and they are not the ones with the most data.
+- Consensus baseline is **format-matched**: superflex (`rsf`) for 2025, standard
+  (`ro`) for the 1-QB seasons. Scoring a 1-QB draft against superflex ranks would
+  manufacture huge fake "reaches" at QB — format difference posing as personality.
+- **A manager's own history can MISLEAD across the format change.** In the strict
+  backtest two managers got worse than pure ADP, worst being **Jordan Britt at
+  −0.27** — his 1-QB drafts give no hint he would take the first QB at pick 7.
+  Hence `FORMAT_MATCH_WEIGHT = 3.0` on the format-matched season.
+- Tendencies are shrunk toward the league prior with a 30-pick pseudo-count. With
+  17–49 picks per manager this is not conservatism, it is the only way to avoid
+  publishing confident nonsense.
+- QB timing splits the league: **Britt, Leahy, Rogo, Sims** take their first QB
+  inside the first 18% of the draft; **Benca, Jeff Boyd, Josh Boyd, Sharrett**
+  wait past 33%.
+- §1 spells a manager "R. Sharrett"; ESPN says "Rayne Sharrett" — explicit alias
+  map, never fuzzy matching.
 
 **M4 findings:**
 - **The flex has NEVER started a tight end.** 364 flex starts across 2023–2025:
