@@ -14,7 +14,8 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-.python-version
+# .python-version is deliberately TRACKED — draft day must reproduce the exact
+# interpreter this was rehearsed on. Do not add it here.
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
