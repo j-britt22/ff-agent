@@ -14,35 +14,64 @@ import polars as pl
 from ff_agent.config import FREE_BYE_WEEKS, POSITION_MAXIMA, STARTER_SLOTS
 
 
-def divergences(board: pl.DataFrame, top: int = 50, min_gap: int = 5) -> pl.DataFrame:
-    """Where this board disagrees with consensus, and why.
+BLEND_WEIGHT = 0.12
+"""M3's blend weight — needed to size the model's contribution in points."""
 
-    ``rank_vs_ecr`` is positive when we rank a player HIGHER than consensus does.
+
+def divergences(board: pl.DataFrame, top: int = 50, min_gap: int = 5) -> pl.DataFrame:
+    """Where this board disagrees with consensus, and WHY.
+
+    ``rank_vs_ecr`` is positive when we rank a player HIGHER than consensus.
+
+    Attribution compares the actual point contributions and picks the largest one
+    whose SIGN matches the direction of the disagreement. Reporting whichever
+    flag happens to be set instead would mislabel players: Tucker Kraft carries a
+    TD-regression flag and still ranks 39 spots ABOVE consensus, so the flag is
+    not what moved him — positional scarcity is.
     """
     sub = board.head(top).filter(pl.col("rank_vs_ecr").abs() >= min_gap)
 
+    contrib = sub.with_columns(
+        pl.col("sack_adjustment").fill_null(0.0).alias("c_sack"),
+        pl.col("bye_adjustment").fill_null(0.0).alias("c_bye"),
+        (BLEND_WEIGHT * (pl.col("model_points") - pl.col("consensus_points"))
+         ).fill_null(0.0).alias("c_model"),
+    )
+    # whatever the named terms do not explain is positional: ECR ranks across
+    # positions, VOR prices each against its own replacement level
+    contrib = contrib.with_columns(
+        (pl.col("vor") - pl.col("consensus_points")
+         - pl.col("c_sack") - pl.col("c_bye") - pl.col("c_model")).alias("c_position")
+    )
+
+    up = pl.col("rank_vs_ecr") > 0
+    def aligned(col: str) -> pl.Expr:
+        """Contribution magnitude, but only when it pushes the right way."""
+        c = pl.col(col)
+        return pl.when((up & (c > 0)) | (~up & (c < 0))).then(c.abs()).otherwise(0.0)
+
     reason = (
-        pl.when(pl.col("sack_adjustment").abs() >= 3.0)
-        .then(pl.lit("sack rate vs expected (§3.3) — persistent trait, unpriced by consensus"))
-        .when(pl.col("bye_adjustment") > 0)
-        .then(pl.lit("free bye in week 5/14 (§2.1)"))
-        .when(pl.col("flag_td_regression"))
-        .then(pl.lit("TD regression fade (ADD-§A.1, receivers only)"))
-        .when((pl.col("model_points") - pl.col("consensus_points")).abs() >= 25)
+        pl.when((aligned("c_sack") >= aligned("c_bye"))
+                & (aligned("c_sack") >= aligned("c_model"))
+                & (aligned("c_sack") >= 2.0))
+        .then(pl.lit("sack rate vs expected (§3.3) — a persistent trait consensus does not price"))
+        .when((aligned("c_model") >= aligned("c_bye"))
+              & (aligned("c_model") >= 2.0))
         .then(pl.lit("opportunity model disagrees with consensus (§7.2 step 3)"))
+        .when(aligned("c_bye") >= 1.0)
+        .then(pl.lit("free bye in week 5 or 14 (§2.1)"))
         .otherwise(pl.lit("positional replacement level (§7.3) — scarcity, not the player"))
         .alias("reason")
     )
-    return sub.with_columns(
+    return contrib.with_columns(
         reason,
         (pl.col("model_points") - pl.col("consensus_points")).round(1)
         .alias("model_minus_consensus"),
-        pl.when(pl.col("rank_vs_ecr") > 0).then(pl.lit("HIGHER"))
-        .otherwise(pl.lit("lower")).alias("vs_consensus"),
+        pl.when(up).then(pl.lit("HIGHER")).otherwise(pl.lit("lower")).alias("vs_consensus"),
     ).select(
         "overall_rank", "name", "position", "team", "ecr", "rank_vs_ecr",
         "vs_consensus", "reason", "vor", "bye_adjustment", "sack_adjustment",
-        "model_minus_consensus",
+        "model_minus_consensus", "flag_sack_risk", "flag_td_regression",
     ).sort("rank_vs_ecr", descending=True)
 
 
