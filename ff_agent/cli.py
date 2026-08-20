@@ -69,6 +69,48 @@ def cmd_byes(_) -> int:
     return 0
 
 
+def _gate_one(label: str, frame: pl.DataFrame) -> bool:
+    """Resolve one population — players AND D/ST — and assert §0.2."""
+    has_pos = "position" in frame.columns
+    if has_pos:
+        dst = frame.filter(pl.col("position") == "D/ST")
+        players = frame.filter(pl.col("position") != "D/ST")
+    else:  # draft history carries no position column
+        dst = frame.filter(pl.col("espn_id").str.starts_with("-"))
+        players = frame.filter(~pl.col("espn_id").str.starts_with("-"))
+        players = players.with_columns(pl.lit(None, dtype=pl.Utf8).alias("position"),
+                                       pl.lit(None, dtype=pl.Utf8).alias("team"))
+
+    ok = True
+    print(f"\n─── {label} ───  {players.height} players + {dst.height} D/ST")
+    res = cw.resolve_players(players) if players.height else None
+    if res is not None:
+        with WIDE:
+            print(cw.resolution_summary(res))
+        try:
+            cw.assert_all_resolved(res, label)
+        except cw.CrosswalkError as e:
+            print(f"FAIL (players, unresolved):\n{e}")
+            ok = False
+        try:
+            # resolving is not enough — it must resolve to the RIGHT person
+            cw.assert_resolutions_plausible(res, label, SEASON)
+        except cw.CrosswalkError as e:
+            print(f"FAIL (players, wrong person):\n{e}")
+            ok = False
+    if dst.height:
+        dres = cw.resolve_dst(dst)
+        bad = dres.filter(pl.col("match_method") == "unresolved")
+        if bad.height:
+            print(f"FAIL (D/ST): {bad.height} unresolved\n{bad.select('espn_id', 'name')}")
+            ok = False
+        else:
+            print(f"  D/ST: all {dst.height} resolved")
+    if ok:
+        print("PASS: every entry resolves to exactly one canonical id")
+    return ok
+
+
 def cmd_crosswalk(_) -> int:
     canon = cw.canonical_players()
     print(f"canonical players: {canon.height:,}")
@@ -85,24 +127,22 @@ def cmd_crosswalk(_) -> int:
 
     from ff_agent.data import espn
 
-    rc = 0
-    for label, frame in (
+    populations: list[tuple[str, pl.DataFrame]] = [
         (f"draftable_pool_{SEASON}", espn.draftable_players(SEASON)),
         (f"rosters_{LAST_SEASON}", espn.rosters(LAST_SEASON)),
-    ):
-        players = frame.filter(pl.col("position") != "D/ST")
-        dst = frame.filter(pl.col("position") == "D/ST")
-        res = cw.resolve_players(players)
-        print(f"\n─── {label} ───  {players.height} players + {dst.height} D/ST")
-        with WIDE:
-            print(cw.resolution_summary(res))
+    ]
+    for yr in (2023, 2024, 2025):
         try:
-            cw.assert_all_resolved(res, label)
-            print("PASS: every player resolves to exactly one canonical id")
-        except cw.CrosswalkError as e:
-            print(f"FAIL:\n{e}")
-            rc = 1
-    return rc
+            populations.append((f"draft_{yr}", espn.draft_results(yr)))
+        except Exception as e:
+            print(f"  (skipping draft_{yr}: {type(e).__name__})")
+
+    ok = True
+    for label, frame in populations:
+        ok &= _gate_one(label, frame)
+    print("\n" + ("GATE PASSED — Milestone 1 assertion holds" if ok
+                   else "GATE FAILED — see reports/"))
+    return 0 if ok else 1
 
 
 def cmd_verify(_) -> int:

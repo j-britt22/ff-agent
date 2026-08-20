@@ -89,17 +89,48 @@ def verify_credentials(year: int = SEASON) -> dict[str, Any]:
 
 
 # ─── Extraction helpers ──────────────────────────────────────────────────────
+PLAYER_SCHEMA = {
+    "espn_id": pl.Utf8,
+    "name": pl.Utf8,
+    "position": pl.Utf8,
+    "team": pl.Utf8,
+    "injury_status": pl.Utf8,
+    "pos_rank": pl.Int64,
+    "percent_owned": pl.Float64,
+    "percent_started": pl.Float64,
+    "source": pl.Utf8,
+}
+"""Explicit schema. ESPN returns [] rather than null for several fields during
+the preseason (posRank, acquisitionType), which makes polars' type inference
+fail on the first all-empty column. Never rely on inference here."""
+
+
+def _scalar(v, cast=None):
+    """ESPN gives [] for 'no value' on some fields. Flatten to a scalar/None."""
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else None
+    if v is None or v == "":
+        return None
+    if cast is not None:
+        try:
+            return cast(v)
+        except (TypeError, ValueError):
+            return None
+    return v
+
+
 def _player_rows(players, source: str) -> list[dict]:
     rows = []
     for p in players:
         rows.append({
             "espn_id": str(getattr(p, "playerId", "") or ""),
-            "name": getattr(p, "name", None),
-            "position": getattr(p, "position", None),
-            "team": getattr(p, "proTeam", None),
-            "injury_status": getattr(p, "injuryStatus", None),
-            "pos_rank": getattr(p, "posRank", None),
-            "percent_owned": getattr(p, "percent_owned", None),
+            "name": _scalar(getattr(p, "name", None)),
+            "position": _scalar(getattr(p, "position", None)),
+            "team": _scalar(getattr(p, "proTeam", None)),
+            "injury_status": _scalar(getattr(p, "injuryStatus", None)),
+            "pos_rank": _scalar(getattr(p, "posRank", None), int),
+            "percent_owned": _scalar(getattr(p, "percent_owned", None), float),
+            "percent_started": _scalar(getattr(p, "percent_started", None), float),
             "source": source,
         })
     return rows
@@ -122,9 +153,15 @@ def draftable_players(year: int = SEASON, size: int = 1200, **kw) -> pl.DataFram
             raise ESPNUnavailable(f"free_agents({size}) failed: {exc}") from exc
         if not rows:
             raise ESPNUnavailable(f"No players returned for {year}.")
-        return pl.DataFrame(rows).unique(subset=["espn_id"], keep="first")
+        return pl.DataFrame(rows, schema=PLAYER_SCHEMA).unique(subset=["espn_id"], keep="first")
 
     return cached("espn_players", fetch, season=year, source="espn", **kw)
+
+
+ROSTER_SCHEMA = {
+    "team_id": pl.Int64, "fantasy_team": pl.Utf8, "manager": pl.Utf8,
+    "espn_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8, "team": pl.Utf8,
+}
 
 
 def rosters(year: int, **kw) -> pl.DataFrame:
@@ -145,13 +182,16 @@ def rosters(year: int, **kw) -> pl.DataFrame:
                     "fantasy_team": getattr(t, "team_name", None),
                     "manager": owner or None,
                     "espn_id": str(getattr(p, "playerId", "") or ""),
-                    "name": getattr(p, "name", None),
-                    "position": getattr(p, "position", None),
-                    "team": getattr(p, "proTeam", None),
+                    "name": _scalar(getattr(p, "name", None)),
+                    "position": _scalar(getattr(p, "position", None)),
+                    "team": _scalar(getattr(p, "proTeam", None)),
                 })
         if not rows:
-            raise ESPNUnavailable(f"No rosters returned for {year}.")
-        return pl.DataFrame(rows)
+            raise ESPNUnavailable(
+                f"No rosters returned for {year}. If {year} is the upcoming "
+                f"season, this is expected — the draft has not happened yet."
+            )
+        return pl.DataFrame(rows, schema=ROSTER_SCHEMA)
 
     return cached("espn_rosters", fetch, season=year, source="espn", **kw)
 

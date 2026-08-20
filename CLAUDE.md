@@ -85,8 +85,10 @@ Defined in `.claude/agents/`. Use them rather than doing this work inline:
 
 ### MILESTONE STATUS
 
-**M1 (data layer + ID crosswalk) — built, gate not yet closed.** Blocked only on
-ESPN credentials; every nflverse-side piece is done and tested.
+**M1 (data layer + ID crosswalk) — COMPLETE, gate closed 2026-08-20.**
+Zero unmatched across all five populations: 2026 draftable pool (995 players +
+32 D/ST), 2025 rosters (127+10), and the 2023/2024/2025 drafts. 105 tests pass.
+**Next: M2, the scoring engine.**
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
@@ -94,7 +96,7 @@ uv run python -m ff_agent.cli byes        # §2.1 free-bye teams
 uv run python -m ff_agent.cli crosswalk   # THE GATE — needs .env
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 72 pass, 3 skip (ESPN-gated)
+uv run pytest                             # 105 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -111,25 +113,56 @@ human decisions belong in git).
 - **2026 has only 4 free-bye teams: ARI, CAR, DAL, KC** (2025 had 8). Week-14 NFL
   byes do exist in 2026, so §2.1 holds — but the pool is half as wide, which makes
   the flag more selective, not less valuable.
+- **The §11 gate is necessary but NOT sufficient.** "Resolves to exactly one ID"
+  can pass while resolving to the *wrong person*. Live case found: nflverse assigns
+  `espn_id 4686658` to a DB who last played in **1984**, but that id belongs to the
+  2026 rookie RB Mike Washington Jr. (LV), who was ~10% rostered and carries no
+  `espn_id` in nflverse. The direct-espn_id tier — the highest-confidence tier —
+  produced exactly §6's "board recommends a retired player" failure while passing
+  every assertion. `assert_resolutions_plausible()` now flags any resolution onto a
+  player whose career ended >10 seasons before the target season. Position mismatch
+  is deliberately NOT used: Travis Hunter is a CB in nflverse and a WR in ESPN, and
+  that match is correct.
+- **D/ST use negative ESPN ids**: `-16000 − proTeamId` (SF = `-16025`, BAL = `-16033`).
+  Draft history stores them this way. `resolve_dst()` handles both that and team
+  abbreviations; `WSH → WAS` is the only live abbreviation difference.
+- 5 override rows are in `overrides/player_id_overrides.csv`, each with its evidence:
+  1 bad nflverse `espn_id` (Mike Washington Jr.), 1 stale nflverse `espn_id`
+  (Chris Manhertz, nflverse says 4071345, ESPN uses 2531358), and 3 UDFAs with
+  genuinely no nflverse counterpart, marked `NO_NFLVERSE_MATCH` → `has_nflverse_data
+  = False` so no projection is ever invented for them.
 - Two real schedule anomalies live in the history window and are handled
   explicitly: 2022 BUF/CIN week 17 (cancelled, Damar Hamlin — both played 16 games,
   relevant to §2.5) and 2017 MIA/TB week 1 (postponed for Hurricane Irma, replayed
   in their week-11 bye, so week 1 became their functional bye).
 
-### OPEN — unresolved, do not silently assume
-- [ ] `league_id`, `ESPN_S2`, `ESPN_SWID` — `.env` exists as a template, values not
-      filled in. **This is the only thing blocking Milestone 1 from closing.**
-- [ ] `draft_date_time` — unknown. If it compresses, triage order is 1 → 2 → 3 → 9.
-- [ ] `playoff_weeks: [15,16,17]` and `first_round_byes: 2` — **inferred, marked CONFIRM in §1.**
-      §8's entire objective function (P(top-2 seed)) rests on these.
-- [ ] Seeding on **raw wins or win pct** (§2.5) — you play 12 games, others play 13.
-- [ ] D/ST points-allowed table lists `18-21: 0` *and* `22-27: 0`. ESPN's default for 22-27 is
-      −1. Verify against the live settings page before Milestone 2's exact-match test.
-- [ ] Keeper league or full redraft? Unstated. Changes pick supply and all nine slot plans.
-- [ ] How many prior seasons of this league exist on ESPN, same managers? Gates Milestone 5.
-- [ ] Assumed: `total: 17` = 10 starters + 7 bench, IR is an 18th slot outside the 17.
+### CONFIRMED 2026-08-20 from ESPN (`artifacts/espn_settings_2026.json`)
+Everything §1 marked CONFIRM is now verified from the source, not inferred.
 
----
+| Question | Answer |
+|---|---|
+| League | **Wildcats League**, 9 teams, `league_id` in `.env` |
+| `playoff_weeks` | **[15, 16, 17]** — `reg_season_count=14`, matchups run to 17, `playoff_matchup_period_length=1` |
+| `first_round_byes` | **2** — forced by structure: 6 teams over 3 one-week rounds. §2.4 holds |
+| Keeper or redraft | **FULL REDRAFT** (`keeper_count = 0`) |
+| Waivers | **rolling priority** (`faab = false`), confirming §9.3's model |
+| Roster | matches §1 exactly; **IR is an 18th slot** outside the 17 — the assumption was right |
+| D/ST `18-21` and `22-27` | **both really are 0.** ESPN omits zero-valued rules; both absent. §1 was NOT a transcription slip |
+| D/ST yards `300-349` | **0**, likewise absent. §1 correct |
+| Every §1 scoring rule | verified exactly, incl. `SKD −1` (sack taken) and `RA 0.05` (rush attempt) |
+| My schedule | verified: 12 games, byes weeks 5 & 14, the four double-up opponents in weeks 1/10, 2/11, 3/12, 4/13 |
+| Trade deadline | 2026-12-02 |
+| League history | **3 seasons: 2023, 2024, 2025.** All drafts + rosters cached |
+
+### STILL OPEN
+- [ ] `draft_date_time` — unknown. If it compresses, triage order is 1 → 2 → 3 → 9.
+- [ ] **Seeding on raw wins or win pct (§2.5).** `playoff_seed_tie_rule = H2H_RECORD`
+      is only the *tiebreak*. ESPN standings are win-pct based by default, which
+      would neutralise the 12-vs-13-game disadvantage — but confirm visually in the
+      standings page before the season simulator (M6) relies on it.
+- [ ] League **team count changed every year** (2023: 8, 2024: 10, 2025: 8, 2026: 9).
+      Positional-run dynamics do not transfer cleanly across seasons — M5 must
+      weight by roster-slot count, not treat the three drafts as one sample.
 
 # LEAGUE SPEC — §1, §2, §3 (verbatim from FANTASY_SPEC.md)
 

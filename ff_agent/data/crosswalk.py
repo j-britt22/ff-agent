@@ -42,6 +42,20 @@ from ff_agent.data import nflverse as nv
 OVERRIDE_PATH = OVERRIDES_DIR / "player_id_overrides.csv"
 OVERRIDE_COLUMNS = ["espn_id", "gsis_id", "player_name", "reason", "added_at"]
 
+NO_NFLVERSE_MATCH = "NO_NFLVERSE_MATCH"
+"""Sentinel for the ``gsis_id`` column of an override.
+
+Some ESPN players genuinely have no nflverse counterpart — undrafted free agents
+and camp bodies who have never taken an NFL regular-season snap and so were never
+issued a gsis_id. They must still RESOLVE (otherwise the §0.2 gate can never
+close), but they must never be mistaken for a player we have history on.
+
+Such a player gets a minted ``ESPN_<espn_id>`` canonical id and
+``has_nflverse_data = False``. Downstream that flag is a hard stop: a player with
+no history must never receive a modelled projection. This is the opposite of
+papering over a miss — it records, in a tracked file, a human-verified finding
+that no counterpart exists."""
+
 # ─── Teams ───────────────────────────────────────────────────────────────────
 CURRENT_TEAMS: tuple[str, ...] = (
     "ARI", "ATL", "BAL", "BUF", "CAR", "CHI", "CIN", "CLE", "DAL", "DEN",
@@ -69,15 +83,97 @@ def normalize_team(abbr: str | None) -> str | None:
     return ESPN_TEAM_ALIASES.get(a, a)
 
 
+DST_ID_OFFSET = -16000
+"""ESPN encodes a team defense as a NEGATIVE player id: ``-16000 - proTeamId``.
+So the 49ers (proTeamId 25) are ``-16025`` and the Ravens (33) are ``-16033``.
+These never appear in any player crosswalk — D/ST are team entities, not people
+(CLAUDE.md §0.2 corollary), and every one of them shows up in real draft history.
+"""
+
+
+def espn_dst_id(pro_team_id: int) -> str:
+    return str(DST_ID_OFFSET - int(pro_team_id))
+
+
 def dst_crosswalk() -> pl.DataFrame:
-    """The 32 team defenses. canonical_id is DST_<nflverse abbr>."""
-    return pl.DataFrame(
-        {
-            "team": list(CURRENT_TEAMS),
-            "canonical_id": [f"DST_{t}" for t in CURRENT_TEAMS],
-            "position": ["DST"] * 32,
-        }
+    """The 32 team defenses: ESPN id and abbreviation -> nflverse team abbr.
+
+    Built from espn_api's own PRO_TEAM_MAP so it cannot drift from the source,
+    then asserted down to exactly the 32 current teams.
+    """
+    from espn_api.football.constant import PRO_TEAM_MAP
+
+    rows = []
+    for pro_id, espn_abbr in PRO_TEAM_MAP.items():
+        if not espn_abbr or espn_abbr == "None" or int(pro_id) == 0:
+            continue
+        team = normalize_team(espn_abbr)
+        if team not in CURRENT_TEAMS:
+            continue
+        rows.append({
+            "espn_id": espn_dst_id(pro_id),
+            "pro_team_id": int(pro_id),
+            "espn_abbr": espn_abbr,
+            "team": team,
+            "canonical_id": f"DST_{team}",
+            "position": "DST",
+        })
+    df = pl.DataFrame(rows).unique(subset=["team"], keep="first").sort("team")
+    if df.height != 32:
+        missing = sorted(set(CURRENT_TEAMS) - set(df["team"].to_list()))
+        raise CrosswalkError(
+            f"D/ST crosswalk built {df.height} teams, expected 32. Missing: {missing}"
+        )
+    if df["espn_id"].n_unique() != 32 or df["canonical_id"].n_unique() != 32:
+        raise CrosswalkError("D/ST crosswalk is not injective.")
+    return df
+
+
+def resolve_dst(rows: pl.DataFrame) -> pl.DataFrame:
+    """Resolve ESPN D/ST entries to DST_<team> canonical ids.
+
+    Accepts either the negative ESPN id (how draft history stores them) or a
+    team abbreviation (how the draftable pool stores them).
+    """
+    x = cw_dst = dst_crosswalk()
+    out = rows.with_columns(pl.col("espn_id").cast(pl.Utf8))
+
+    out = out.join(
+        cw_dst.select("espn_id", pl.col("canonical_id").alias("_by_id")),
+        on="espn_id", how="left",
     )
+    if "team" in rows.columns:
+        out = out.with_columns(
+            pl.col("team").map_elements(normalize_team, return_dtype=pl.Utf8).alias("_team")
+        ).join(
+            cw_dst.select(pl.col("team").alias("_team"),
+                          pl.col("canonical_id").alias("_by_team")),
+            on="_team", how="left",
+        )
+    else:
+        out = out.with_columns(pl.lit(None, dtype=pl.Utf8).alias("_by_team"))
+
+    out = out.with_columns(
+        pl.coalesce("_by_id", "_by_team").alias("canonical_id"),
+        pl.when(pl.col("_by_id").is_not_null()).then(pl.lit("dst_espn_id"))
+        .when(pl.col("_by_team").is_not_null()).then(pl.lit("dst_team_abbr"))
+        .otherwise(pl.lit("unresolved")).alias("match_method"),
+        pl.lit(True).alias("has_nflverse_data"),
+    )
+    drop = [c for c in ("_by_id", "_by_team", "_team") if c in out.columns]
+    return out.drop(drop)
+
+
+def is_dst(position: str | None, espn_id: str | None = None) -> bool:
+    """True for a team defense in either ESPN spelling."""
+    if position and position.replace("/", "").upper() in {"DST", "DEFST"}:
+        return True
+    if espn_id:
+        try:
+            return int(espn_id) <= DST_ID_OFFSET
+        except (TypeError, ValueError):
+            return False
+    return False
 
 
 # ─── Name normalization — DIAGNOSTIC AND EXACT-TIER USE ONLY ────────────────
@@ -189,6 +285,14 @@ def load_overrides() -> pl.DataFrame:
     return df.select(OVERRIDE_COLUMNS)
 
 
+def mark_no_nflverse_match(espn_id: str, player_name: str, reason: str) -> None:
+    """Record that an ESPN player has NO nflverse counterpart.
+
+    Only after actually searching. The evidence belongs in ``reason``.
+    """
+    add_override(espn_id, NO_NFLVERSE_MATCH, player_name, reason)
+
+
 def add_override(espn_id: str, gsis_id: str, player_name: str, reason: str) -> None:
     """Record a human decision. Appends; never rewrites an existing row."""
     cur = load_overrides()
@@ -254,13 +358,21 @@ def resolve_players(
     )
     src = src.join(unique_triple, on=["_nname", "position", "_team"], how="left")
 
+    is_espn_only = pl.col("_ov_id") == NO_NFLVERSE_MATCH
+
     resolved = src.with_columns(
-        pl.coalesce("_ov_id", "_id_espn", "_id_triple").alias("canonical_id"),
-        pl.when(pl.col("_ov_id").is_not_null()).then(pl.lit("override"))
+        pl.when(is_espn_only)
+        .then(pl.concat_str([pl.lit("ESPN_"), pl.col("espn_id")]))
+        .otherwise(pl.coalesce("_ov_id", "_id_espn", "_id_triple"))
+        .alias("canonical_id"),
+        pl.when(is_espn_only).then(pl.lit("espn_only"))
+        .when(pl.col("_ov_id").is_not_null()).then(pl.lit("override"))
         .when(pl.col("_id_espn").is_not_null()).then(pl.lit("espn_id"))
         .when(pl.col("_id_triple").is_not_null()).then(pl.lit("name_pos_team"))
         .otherwise(pl.lit("unresolved"))
         .alias("match_method"),
+    ).with_columns(
+        (pl.col("match_method") != "espn_only").alias("has_nflverse_data")
     ).drop("_ov_id", "_id_espn", "_id_triple", "_nname", "_team")
 
     return resolved
@@ -302,6 +414,77 @@ def assert_all_resolved(resolved: pl.DataFrame, label: str) -> pl.DataFrame:
         f"  (helper: ff_agent.data.crosswalk.add_override).\n"
         f"  Do NOT relax this assertion and do NOT add fuzzy matching."
     )
+
+
+STALE_SEASONS_THRESHOLD = 10
+"""A resolved player whose nflverse record ends this many seasons before the
+target season is almost certainly a WRONG JOIN, not a comeback."""
+
+
+def implausible_resolutions(
+    resolved: pl.DataFrame,
+    season: int,
+    canonical: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Catch joins that RESOLVED but resolved to the wrong person.
+
+    §11's gate — "every player resolves to exactly one ID" — cannot catch this
+    class of error, and we hit a live one: nflverse lists ``espn_id 4686658``
+    against a defensive back who last played in **1984**, but that ESPN id
+    actually belongs to a 2026 rookie running back who was ~10% rostered. The
+    direct espn_id tier, our highest-confidence tier, therefore produced exactly
+    the failure §6 warns about — a board recommending a long-retired player —
+    while passing every assertion.
+
+    So: a resolved player whose nflverse career ended more than
+    STALE_SEASONS_THRESHOLD seasons ago is flagged. Position mismatch alone is
+    NOT used, because genuine two-way and hybrid players exist (Travis Hunter is
+    a CB in nflverse and a WR in ESPN, and that match is correct).
+    """
+    canon = canonical_players() if canonical is None else canonical
+    joined = resolved.join(
+        canon.select(
+            "canonical_id",
+            pl.col("position").alias("nflverse_position"),
+            pl.col("display_name").alias("nflverse_name"),
+            pl.col("last_season").cast(pl.Int64, strict=False),
+        ),
+        on="canonical_id", how="left",
+    )
+    cutoff = season - STALE_SEASONS_THRESHOLD
+    return (
+        joined.filter(pl.col("last_season").is_not_null() & (pl.col("last_season") < cutoff))
+        .with_columns(
+            (pl.lit("nflverse career ended ") + pl.col("last_season").cast(pl.Utf8)
+             + pl.lit(f", more than {STALE_SEASONS_THRESHOLD} seasons before {season}"))
+            .alias("implausible_reason")
+        )
+    )
+
+
+def assert_resolutions_plausible(
+    resolved: pl.DataFrame, label: str, season: int,
+    canonical: pl.DataFrame | None = None,
+) -> pl.DataFrame:
+    """Blocking companion to assert_all_resolved(). See implausible_resolutions()."""
+    bad = implausible_resolutions(resolved, season, canonical)
+    if bad.height:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        report = REPORTS_DIR / f"implausible_{label}.csv"
+        bad.write_csv(report)
+        cols = [c for c in ("espn_id", "name", "position", "canonical_id",
+                            "nflverse_name", "nflverse_position", "last_season")
+                if c in bad.columns]
+        raise CrosswalkError(
+            f"{label}: {bad.height} player(s) RESOLVED TO THE WRONG PERSON.\n"
+            f"{bad.select(cols)}\n"
+            f"  Report: {report}\n"
+            f"  These passed the 'exactly one id' gate but joined onto a player\n"
+            f"  whose career ended long ago — nflverse's espn_id is wrong for them.\n"
+            f"  Fix with an explicit override mapping the ESPN id to the correct\n"
+            f"  gsis_id. Do NOT widen the threshold to make this pass."
+        )
+    return resolved
 
 
 def resolution_summary(resolved: pl.DataFrame) -> pl.DataFrame:

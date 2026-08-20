@@ -38,7 +38,8 @@ CONTAMINATED_SEASONS = frozenset({2020})
 """COVID: no preseason, empty stadiums, mass absences. Keep, but flag."""
 
 # ─── League structure (§1) ───────────────────────────────────────────────────
-LEAGUE_NAME = "First Down Syndrome"
+MY_TEAM_NAME = "First Down Syndrome"
+LEAGUE_NAME = "Wildcats League"        # confirmed from ESPN, 2026-08-20
 PLATFORM = "espn"
 N_TEAMS = 9
 DRAFT_TYPE = "snake"
@@ -54,16 +55,36 @@ board term, not a tiebreaker."""
 MY_GAME_WEEKS = tuple(w for w in REGULAR_SEASON_WEEKS if w not in MY_BYE_WEEKS)
 assert len(MY_GAME_WEEKS) == 12
 
-# Marked CONFIRM in §1 — see CLAUDE.md OPEN list. Do not treat as verified.
-PLAYOFF_WEEKS_ASSUMED = (15, 16, 17)
-PLAYOFF_TEAMS_ASSUMED = 6
-FIRST_ROUND_BYES_ASSUMED = 2
+# CONFIRMED 2026-08-20 from ESPN league settings (artifacts/espn_settings_2026.json).
+# §1 marked these CONFIRM; they are now verified, not inferred.
+PLAYOFF_WEEKS = (15, 16, 17)
+"""reg_season_count=14 and matchup_periods run to 17, at
+playoff_matchup_period_length=1, so weeks 15-17 are three one-week rounds."""
+
+PLAYOFF_TEAMS = 6            # settings: playoff_team_count
+FIRST_ROUND_BYES = 2
+"""Forced by structure: 6 teams over 3 one-week rounds means round 1 is two
+games (seeds 3-6) and the top two seeds sit. §2.4's 'a bye is worth about as
+much as everything else combined' therefore holds."""
+
+PLAYOFF_SEED_TIE_RULE = "H2H_RECORD"   # settings: playoff_seed_tie_rule
+KEEPER_COUNT = 0
+IS_KEEPER_LEAGUE = False     # settings: keeper_count == 0 -> FULL REDRAFT
+WAIVER_TYPE = "rolling_priority"       # settings: faab == false
+TRADE_DEADLINE = "2026-12-02 12:00"    # settings: trade_deadline (epoch ms)
 
 STARTER_SLOTS = {"QB": 2, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1, "DST": 1, "K": 1}
 ROSTER_TOTAL = 17
 BENCH_SLOTS = 7
 IR_SLOTS = 1
 POSITION_MAXIMA = {"QB": 4, "RB": 8, "WR": 8, "TE": 3, "DST": 3, "K": 3}
+
+def normalize_team_name(name: str | None) -> str:
+    """ESPN team names carry curly apostrophes and trailing spaces."""
+    if not name:
+        return ""
+    return name.replace("\u2019", "'").replace("\u2018", "'").strip()
+
 
 FANTASY_POSITIONS = frozenset({"QB", "RB", "WR", "TE", "K", "DST"})
 SKILL_POSITIONS = frozenset({"QB", "RB", "WR", "TE"})
@@ -72,13 +93,13 @@ SKILL_POSITIONS = frozenset({"QB", "RB", "WR", "TE"})
 # weight 2 = faced twice = 8 of my 12 games. Used by the opponent model (M5)
 # and in-season scouting; kept here so there is one source of truth.
 OPPONENTS: tuple[dict, ...] = (
-    {"team": "Hodor's Hodors",        "manager": "Camden Sims",    "weeks": (1, 10), "weight": 2},
+    {"team": "Hodor\u2019s Hodors",    "manager": "Camden Sims",    "weeks": (1, 10), "weight": 2},
     {"team": "Personality Hires",     "manager": "Kylie Leahy",    "weeks": (2, 11), "weight": 2},
     {"team": "Clearing the Fields",   "manager": "R. Sharrett",    "weeks": (3, 12), "weight": 2},
     {"team": "Gibbs Me My Money",     "manager": "Matthew Benca",  "weeks": (4, 13), "weight": 2},
     {"team": "A Chane Reaction",      "manager": "Jeff Boyd",      "weeks": (6,),    "weight": 1},
     {"team": "Unsolicited Dak Pics",  "manager": "Josh Boyd",      "weeks": (7,),    "weight": 1},
-    {"team": "Nothing Beats a JJett 2 H...", "manager": "Hanna Rogo", "weeks": (8,), "weight": 1},
+    {"team": "Nothing Beats a JJett 2 Holiday", "manager": "Hanna Rogo", "weeks": (8,), "weight": 1},
     {"team": "leah's team",           "manager": "leah gottlieb",  "weeks": (9,),    "weight": 1},
 )
 DOUBLE_UP_MANAGERS = tuple(o["manager"] for o in OPPONENTS if o["weight"] == 2)

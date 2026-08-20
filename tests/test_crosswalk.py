@@ -207,3 +207,127 @@ def test_espn_dst_entries_all_map_to_a_real_team():
     valid = set(cw.dst_crosswalk()["team"].to_list())
     bad = [t for t in dst["team"].to_list() if cw.normalize_team(t) not in valid]
     assert not bad, f"D/ST rows with unmappable teams: {bad}"
+
+
+# ─── players with no nflverse counterpart ────────────────────────────────────
+def test_espn_only_player_resolves_but_is_flagged(tmp_path, monkeypatch):
+    """An ESPN player with no nflverse record must RESOLVE (so the gate can
+    close) while being clearly marked as having no history to project from."""
+    p = tmp_path / "ov.csv"
+    monkeypatch.setattr(cw, "OVERRIDE_PATH", p)
+    cw.mark_no_nflverse_match("4361665", "Christopher Dunn",
+                              "verified: zero nflverse candidates")
+    probe = pl.DataFrame({
+        "espn_id": ["4361665"], "name": ["Christopher Dunn"],
+        "position": ["K"], "team": [None],
+    })
+    r = cw.resolve_players(probe)
+    assert r["match_method"].to_list() == ["espn_only"]
+    assert r["canonical_id"].to_list() == ["ESPN_4361665"]
+    assert r["has_nflverse_data"].to_list() == [False]
+    cw.assert_all_resolved(r, "espn_only_probe")
+
+
+def test_real_players_are_flagged_as_having_nflverse_data(sample_pool):
+    r = cw.resolve_players(sample_pool)
+    assert r["has_nflverse_data"].all()
+
+
+def test_no_nflverse_match_sentinel_is_not_a_valid_gsis_id():
+    """Guard against the sentinel ever being joined against real data."""
+    assert not cw.NO_NFLVERSE_MATCH.startswith("00-")
+    c = cw.canonical_players()
+    assert c.filter(pl.col("canonical_id") == cw.NO_NFLVERSE_MATCH).height == 0
+
+
+# ─── D/ST: team entities, not players (§0.2 corollary) ──────────────────────
+def test_dst_negative_espn_id_convention():
+    """ESPN encodes a defense as -16000 - proTeamId. Real draft history uses it."""
+    assert cw.espn_dst_id(25) == "-16025"   # 49ers
+    assert cw.espn_dst_id(33) == "-16033"   # Ravens
+    d = cw.dst_crosswalk()
+    assert d.filter(pl.col("espn_id") == "-16025")["team"][0] == "SF"
+    assert d.filter(pl.col("espn_id") == "-16033")["team"][0] == "BAL"
+
+
+def test_dst_crosswalk_is_injective_both_ways():
+    d = cw.dst_crosswalk()
+    assert d.height == 32
+    assert d["espn_id"].n_unique() == 32
+    assert d["canonical_id"].n_unique() == 32
+    assert d["team"].n_unique() == 32
+
+
+def test_dst_resolves_by_negative_id():
+    rows = pl.DataFrame({"espn_id": ["-16025", "-16002"],
+                         "name": ["49ers D/ST", "Bills D/ST"]})
+    r = cw.resolve_dst(rows)
+    assert r["canonical_id"].to_list() == ["DST_SF", "DST_BUF"]
+    assert set(r["match_method"].to_list()) == {"dst_espn_id"}
+
+
+def test_dst_resolves_by_team_abbreviation_including_wsh():
+    rows = pl.DataFrame({"espn_id": ["x"], "name": ["Commanders D/ST"], "team": ["WSH"]})
+    r = cw.resolve_dst(rows)
+    assert r["canonical_id"].to_list() == ["DST_WAS"]
+
+
+def test_unknown_dst_does_not_silently_resolve():
+    rows = pl.DataFrame({"espn_id": ["-19999"], "name": ["Fake D/ST"], "team": ["ZZZ"]})
+    r = cw.resolve_dst(rows)
+    assert r["match_method"].to_list() == ["unresolved"]
+
+
+def test_is_dst_recognises_both_spellings():
+    assert cw.is_dst("D/ST")
+    assert cw.is_dst("DST")
+    assert cw.is_dst(None, "-16025")
+    assert not cw.is_dst("WR", "4429795")
+
+
+# ─── resolving to the WRONG person (the gate §11 specifies cannot catch this) ─
+def test_stale_resolution_is_flagged_as_implausible(tmp_path, monkeypatch):
+    """A 2026 draftable player joined onto someone who last played in 1984 is a
+    wrong join, not a comeback. This is the live bug we hit: nflverse assigns
+    espn_id 4686658 to a DB who retired in 1984, while that id really belongs to
+    a 2026 rookie RB who was ~10% rostered."""
+    monkeypatch.setattr(cw, "OVERRIDE_PATH", tmp_path / "ov.csv")
+    probe = pl.DataFrame({
+        "espn_id": ["4686658"], "name": ["Mike Washington Jr."],
+        "position": ["RB"], "team": ["LV"],
+    })
+    r = cw.resolve_players(probe)
+    # it DOES resolve — that is exactly why the §11 gate alone is insufficient
+    assert r["match_method"].to_list() == ["espn_id"]
+    cw.assert_all_resolved(r, "stale_probe")
+    # but it must fail the plausibility gate
+    bad = cw.implausible_resolutions(r, 2026)
+    assert bad.height == 1
+    assert bad["last_season"][0] == 1984
+    with pytest.raises(cw.CrosswalkError) as e:
+        cw.assert_resolutions_plausible(r, "stale_probe", 2026)
+    assert "WRONG PERSON" in str(e.value)
+
+
+def test_override_repairs_the_bad_nflverse_espn_id():
+    """With the shipped override in place, the real rookie is resolved."""
+    probe = pl.DataFrame({
+        "espn_id": ["4686658"], "name": ["Mike Washington Jr."],
+        "position": ["RB"], "team": ["LV"],
+    })
+    r = cw.resolve_players(probe)
+    assert r["match_method"].to_list() == ["override"]
+    assert r["canonical_id"].to_list() == ["00-0040878"]
+    assert cw.implausible_resolutions(r, 2026).height == 0
+
+
+def test_two_way_players_are_not_falsely_flagged():
+    """Travis Hunter is a CB in nflverse and a WR in ESPN — a CORRECT match.
+    Position mismatch alone must never trigger the implausibility gate."""
+    probe = pl.DataFrame({
+        "espn_id": ["4685415"], "name": ["Travis Hunter"],
+        "position": ["WR"], "team": ["JAX"],
+    })
+    r = cw.resolve_players(probe)
+    assert r.filter(pl.col("match_method") == "unresolved").height == 0
+    assert cw.implausible_resolutions(r, 2026).height == 0
