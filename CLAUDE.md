@@ -62,12 +62,26 @@ Defined in `.claude/agents/`. Use them rather than doing this work inline:
 
 | Decision | Choice |
 |---|---|
-| Target season | **2026**; history window 2021–2025; "last season" = 2025 |
+| Target season | **2026**; history window **2016–2025** (10 seasons); "last season" = 2025 |
 | Python | `uv`, pinned **3.12** (system Python is 3.9.6 / EOL — do not use it) |
-| nflverse client | `nflreadpy` (polars). Note `nfl_data_py.import_ids()` ≈ `nflreadpy.load_ff_playerids()` |
+| nflverse client | `nflreadpy` (polars) |
+| **Crosswalk source** | nflverse **`players`** table — carries `gsis_id` *and* `espn_id` in one row. **Not** DynastyProcess `ff_playerids`, which §6 assumed. Verified 2026-08-19: 98.8% `espn_id` coverage on active skill players, **zero** duplicate `espn_id`s |
+| Rookie detection | `rookie_season` or `years_of_experience`, **never `draft_year`** — `draft_year` is blank for the entire 2026 class and only marks actually-drafted players in prior years |
 | Cache | Parquet per table per season, queried via DuckDB; each file carries a fetch timestamp |
 | Crosswalk test set | ESPN full draftable pool **and** 2025 final ESPN rosters — zero unmatched in both |
 | Odds / weather | Deferred out of Milestone 1; they are §9 weekly signals, not crosswalk inputs |
+
+### Notes on the history window
+- **2016 is the Next Gen Stats boundary** (verified: `ngs_*` covers exactly 2016–2025), so it is a
+  principled start, not an arbitrary one. It buys 9 year-over-year transitions instead of 4 —
+  which is what ADD-§I-3c ("weight inputs by measured stability on *your* data") actually needs,
+  and what ADD-§D age curves need to be more than noise.
+- **Era drift is real.** Do not pool 2016 and 2025 blindly when fitting ADD-§A xFP bucket rates —
+  the passing environment moved. Use the full window for *stability measurement* and age curves;
+  weight recent seasons (or carry a season term) for xFP expected-outcome rates.
+- **2020 is contaminated** (no preseason, empty stadiums, COVID absences). Keep it, but flag it.
+- `ff_opportunity` is **not** in the `nflverse-data` repo; it lives in `nflverse/ffopportunity`.
+  Source separately or drop it — it is a cross-check for M3b, not a dependency.
 
 ### OPEN — unresolved, do not silently assume
 - [ ] `league_id`, `ESPN_S2`, `ESPN_SWID` — **no `.env` yet.** Blocks all ESPN work.
