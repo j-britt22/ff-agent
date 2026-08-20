@@ -48,3 +48,6 @@ logs/
 .idea/
 .vscode/
 *.swp
+
+# ─── Working reports (regenerated; not source) ───────────────────────────────
+reports/

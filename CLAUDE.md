@@ -83,8 +83,42 @@ Defined in `.claude/agents/`. Use them rather than doing this work inline:
 - `ff_opportunity` is **not** in the `nflverse-data` repo; it lives in `nflverse/ffopportunity`.
   Source separately or drop it — it is a cross-check for M3b, not a dependency.
 
+### MILESTONE STATUS
+
+**M1 (data layer + ID crosswalk) — built, gate not yet closed.** Blocked only on
+ESPN credentials; every nflverse-side piece is done and tested.
+
+```bash
+uv run python -m ff_agent.cli status      # cache inventory + staleness
+uv run python -m ff_agent.cli byes        # §2.1 free-bye teams
+uv run python -m ff_agent.cli crosswalk   # THE GATE — needs .env
+uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
+uv run python -m ff_agent.cli offline     # prove the draft-day path
+uv run pytest                             # 72 pass, 3 skip (ESPN-gated)
+```
+
+Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
+(parquet + staleness) · `data/nflverse.py` (ingest + column contract) ·
+`data/byes.py` (§2.1) · `data/espn.py` (league state, read-only) ·
+`data/crosswalk.py` (§0.2 gate) · `overrides/player_id_overrides.csv` (tracked —
+human decisions belong in git).
+
+**Findings worth remembering:**
+- Sacks taken is **`sacks_suffered`**. Not `sacks` (doesn't exist), and NOT
+  `def_sacks` (that is sacks *recorded by* a defender). Rushing attempts is
+  **`carries`**; `attempts` is PASS attempts. Both are §1 scoring categories, so
+  both are pinned by an ingest-time column contract.
+- **2026 has only 4 free-bye teams: ARI, CAR, DAL, KC** (2025 had 8). Week-14 NFL
+  byes do exist in 2026, so §2.1 holds — but the pool is half as wide, which makes
+  the flag more selective, not less valuable.
+- Two real schedule anomalies live in the history window and are handled
+  explicitly: 2022 BUF/CIN week 17 (cancelled, Damar Hamlin — both played 16 games,
+  relevant to §2.5) and 2017 MIA/TB week 1 (postponed for Hurricane Irma, replayed
+  in their week-11 bye, so week 1 became their functional bye).
+
 ### OPEN — unresolved, do not silently assume
-- [ ] `league_id`, `ESPN_S2`, `ESPN_SWID` — **no `.env` yet.** Blocks all ESPN work.
+- [ ] `league_id`, `ESPN_S2`, `ESPN_SWID` — `.env` exists as a template, values not
+      filled in. **This is the only thing blocking Milestone 1 from closing.**
 - [ ] `draft_date_time` — unknown. If it compresses, triage order is 1 → 2 → 3 → 9.
 - [ ] `playoff_weeks: [15,16,17]` and `first_round_byes: 2` — **inferred, marked CONFIRM in §1.**
       §8's entire objective function (P(top-2 seed)) rests on these.

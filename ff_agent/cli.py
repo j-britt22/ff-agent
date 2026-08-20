@@ -1,0 +1,166 @@
+"""Milestone 1 command line.
+
+    uv run python -m ff_agent.cli status      # cache inventory + credential check
+    uv run python -m ff_agent.cli ingest      # pull/refresh nflverse 2016-2025
+    uv run python -m ff_agent.cli byes        # bye table + §2.1 free-bye teams
+    uv run python -m ff_agent.cli crosswalk   # resolve the ESPN pool, assert, report
+    uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
+    uv run python -m ff_agent.cli offline     # prove the offline path works
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+import polars as pl
+
+from ff_agent.config import (
+    FREE_BYE_WEEKS, HISTORY_SEASONS, LAST_SEASON, SEASON, have_espn_credentials,
+)
+from ff_agent.data import byes as byes_mod
+from ff_agent.data import cache, crosswalk as cw
+from ff_agent.data import nflverse as nv
+
+WIDE = pl.Config(tbl_rows=60, tbl_cols=12, fmt_str_lengths=60)
+
+
+def cmd_status(_) -> int:
+    inv = cache.cache_inventory()
+    print(f"cache: {inv.height} tables, {inv['mb'].sum():.0f} MB")
+    stale = inv.filter(pl.col("stale"))
+    with WIDE:
+        print(inv.group_by("table").agg(
+            pl.len().alias("files"), pl.col("mb").sum().round(1).alias("mb"),
+            pl.col("stale").any().alias("any_stale"),
+        ).sort("table"))
+    if stale.height:
+        print(f"\n⚠  {stale.height} STALE file(s) — refresh before trusting output:")
+        with WIDE:
+            print(stale.select("table", "season", "age_hours", "policy"))
+    print(f"\nESPN credentials present: {have_espn_credentials()}")
+    return 0
+
+
+def cmd_ingest(args) -> int:
+    seasons = [args.season] if args.season else HISTORY_SEASONS
+    rep = nv.ingest_all(seasons=seasons, include_pbp=not args.no_pbp)
+    fails = rep.filter(pl.col("status") == "fail")
+    print(f"\n{rep.height} pulls, {fails.height} failures")
+    if fails.height:
+        with WIDE:
+            print(fails)
+        return 1
+    return 0
+
+
+def cmd_byes(_) -> int:
+    for season in (LAST_SEASON, SEASON):
+        print(f"\n─── {season} ───")
+        with WIDE:
+            print(byes_mod.bye_summary(season).select("bye_week", "n_teams", "free_bye"))
+        ft = byes_mod.free_bye_teams(season)
+        print(f"FREE-BYE teams (NFL bye in {sorted(FREE_BYE_WEEKS)}): {len(ft)} → {ft}")
+        anom = byes_mod.schedule_anomalies(season)
+        if anom.height:
+            print("schedule anomalies:")
+            with WIDE:
+                print(anom)
+    return 0
+
+
+def cmd_crosswalk(_) -> int:
+    canon = cw.canonical_players()
+    print(f"canonical players: {canon.height:,}")
+    print(f"D/ST entities:     {cw.dst_crosswalk().height}")
+    print(f"manual overrides:  {cw.load_overrides().height}")
+
+    if not have_espn_credentials():
+        print(
+            "\nESPN credentials absent — cannot run the Milestone 1 gate.\n"
+            "  The gate needs the live draftable pool and last season's rosters.\n"
+            "  Fill in .env (SETUP.md §3), then re-run."
+        )
+        return 2
+
+    from ff_agent.data import espn
+
+    rc = 0
+    for label, frame in (
+        (f"draftable_pool_{SEASON}", espn.draftable_players(SEASON)),
+        (f"rosters_{LAST_SEASON}", espn.rosters(LAST_SEASON)),
+    ):
+        players = frame.filter(pl.col("position") != "D/ST")
+        dst = frame.filter(pl.col("position") == "D/ST")
+        res = cw.resolve_players(players)
+        print(f"\n─── {label} ───  {players.height} players + {dst.height} D/ST")
+        with WIDE:
+            print(cw.resolution_summary(res))
+        try:
+            cw.assert_all_resolved(res, label)
+            print("PASS: every player resolves to exactly one canonical id")
+        except cw.CrosswalkError as e:
+            print(f"FAIL:\n{e}")
+            rc = 1
+    return rc
+
+
+def cmd_verify(_) -> int:
+    from ff_agent.data import espn
+
+    r = espn.verify_credentials(SEASON)
+    if r["ok"]:
+        print(f"OK  {r['league_name']} ({r['n_teams']} teams, {r['year']})")
+        for t in r["team_names"]:
+            print(f"      {t}")
+        return 0
+    print(f"FAIL [{r['stage']}]\n{r['detail']}")
+    return 1
+
+
+def cmd_offline(_) -> int:
+    """Prove the draft-day path: every table served from disk, network off."""
+    print("Reading every cached table with offline=True (no network permitted)…")
+    ok = True
+    checks = [("players", lambda: nv.players(offline=True)),
+              ("schedules", lambda: nv.schedules(offline=True))]
+    for s in HISTORY_SEASONS:
+        checks.append((f"player_stats[{s}]", lambda s=s: nv.player_stats(s, offline=True)))
+        checks.append((f"pbp[{s}]", lambda s=s: nv.pbp(s, offline=True)))
+    for name, fn in checks:
+        try:
+            df = fn()
+            print(f"  ok   {name:22s} {df.height:>8,} rows")
+        except Exception as e:
+            print(f"  FAIL {name:22s} {type(e).__name__}: {str(e).splitlines()[0]}")
+            ok = False
+    try:
+        cw.canonical_players()
+        byes_mod.bye_weeks(SEASON)
+        print("  ok   crosswalk + byes derived offline")
+    except Exception as e:
+        print(f"  FAIL crosswalk/byes: {e}")
+        ok = False
+    print("\nOFFLINE PATH OK" if ok else "\nOFFLINE PATH BROKEN")
+    return 0 if ok else 1
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="ff_agent.cli", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status").set_defaults(fn=cmd_status)
+    p = sub.add_parser("ingest")
+    p.add_argument("--season", type=int)
+    p.add_argument("--no-pbp", action="store_true")
+    p.set_defaults(fn=cmd_ingest)
+    sub.add_parser("byes").set_defaults(fn=cmd_byes)
+    sub.add_parser("crosswalk").set_defaults(fn=cmd_crosswalk)
+    sub.add_parser("verify").set_defaults(fn=cmd_verify)
+    sub.add_parser("offline").set_defaults(fn=cmd_offline)
+    args = ap.parse_args(argv)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
