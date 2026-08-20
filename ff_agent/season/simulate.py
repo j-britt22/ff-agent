@@ -11,9 +11,11 @@ team-weeks:
   is precisely why §2.4 concludes that roster variance is *good* and marginal
   regular-season wins are worth little. Expect wide probability bands; narrow
   ones here would be a lie.
-* **The seeding rule is unresolved** (§2.5: raw wins vs win percentage). Rather
-  than guess, the simulator runs BOTH and reports the difference, converting an
-  open question into a measured sensitivity.
+* **The seeding rule is CONFIRMED as win percentage** (§2.5), from the live
+  standings page ranking on PCT with a GB column. Both rules are still
+  implemented, because the sensitivity is the thing that made confirming it
+  worthwhile: on raw wins a 12-game team would have given up ~8 points of both
+  P(playoffs) and P(top-2 seed). On win percentage, nothing.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import numpy as np
 import polars as pl
 
 from ff_agent.config import (
-    FIRST_ROUND_BYES, MY_TEAM_NAME, PLAYOFF_TEAMS, SEASON,
+    FIRST_ROUND_BYES, MY_TEAM_NAME, PLAYOFF_TEAMS, SEASON, SEEDING_RULE,
 )
 from ff_agent.season import schedule as SCH
 
@@ -94,7 +96,7 @@ def simulate(
     team_sds: dict[str, float] | None = None,
     season: int = SEASON,
     n_sims: int = 20_000,
-    seeding_rule: str = "win_pct",
+    seeding_rule: str = SEEDING_RULE,
     seed: int = 7,
 ) -> SimResult:
     """Run the season ``n_sims`` times and return seeding/title probabilities."""

@@ -241,13 +241,15 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   to M2 validation which uses each season's own rules.
 
 **M6 findings:**
-- **§2.5 ANSWERED, and it is not a technicality.** 2026: five teams play 12 games
-  (you, JJett, Gibbs, Clearing, leah), four play 13. With every team identical,
-  seeding on **raw wins** costs a 12-game team **−7.9 pts of P(playoffs)** and
-  **−8.1 pts of P(top-2 seed)** versus win percentage. Under win percentage the
-  gap vanishes. **Confirm the rule on the standings page** — it is worth ~8 points
-  of the thing §2.4 calls as valuable as everything else combined. The simulator
-  ships BOTH rules and reports the delta.
+- **§2.5 CLOSED — the league seeds on WIN PERCENTAGE**, confirmed from the live
+  standings page (ranks on `PCT`, with `GB`). So **no structural handicap** despite
+  playing 12 games while four teams play 13. This was worth confirming rather than
+  assuming: with every team identical, raw-wins seeding would have cost a 12-game
+  team **−7.9 pts of P(playoffs)** and **−8.1 pts of P(top-2 seed)**. The simulator
+  still ships both rules, because that sensitivity is the reason the question
+  mattered. Practical consequence: **marginal regular-season wins are worth the
+  same to me as to anyone**, so §2.4's "chase seeding and playoff ceiling" stands
+  without an offsetting penalty.
 - **`first_round_byes = 2` is now OBSERVED, not inferred** — the top two seeds
   (Unsolicited Dak Pics, Personality Hires) both sat out week 15 of the real 2025
   bracket.
@@ -382,14 +384,11 @@ Everything §1 marked CONFIRM is now verified from the source, not inferred.
 | Every §1 scoring rule | verified exactly, incl. `SKD −1` (sack taken) and `RA 0.05` (rush attempt) |
 | My schedule | verified: 12 games, byes weeks 5 & 14, the four double-up opponents in weeks 1/10, 2/11, 3/12, 4/13 |
 | Trade deadline | 2026-12-02 |
+| **Seeding rule (§2.5)** | **WIN PERCENTAGE — confirmed 2026-08-20** from the standings page (ranks on `PCT`, with a `GB` column). **No structural handicap** from playing 12 games. Had it been raw wins, M6 measured the cost at **−7.9 pts P(playoffs)** and **−8.1 pts P(top-2)** — which is why it was worth confirming |
 | League history | **3 seasons: 2023, 2024, 2025.** All drafts + rosters cached |
 
 ### STILL OPEN
 - [ ] `draft_date_time` — unknown. If it compresses, triage order is 1 → 2 → 3 → 9.
-- [ ] **Seeding on raw wins or win pct (§2.5).** `playoff_seed_tie_rule = H2H_RECORD`
-      is only the *tiebreak*. ESPN standings are win-pct based by default, which
-      would neutralise the 12-vs-13-game disadvantage — but confirm visually in the
-      standings page before the season simulator (M6) relies on it.
 - [ ] League **team count changed every year** (2023: 8, 2024: 10, 2025: 8, 2026: 9).
       Positional-run dynamics do not transfer cleanly across seasons — M5 must
       weight by roster-slot count, not treat the three drafts as one sample.

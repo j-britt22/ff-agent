@@ -68,6 +68,22 @@ games (seeds 3-6) and the top two seeds sit. §2.4's 'a bye is worth about as
 much as everything else combined' therefore holds."""
 
 PLAYOFF_SEED_TIE_RULE = "H2H_RECORD"   # settings: playoff_seed_tie_rule
+
+SEEDING_RULE = "win_pct"
+"""CONFIRMED 2026-08-20 from the live standings page.
+
+§2.5 flagged this as a real risk: with 9 teams, five play 12 games and four play
+13, and First Down Syndrome is on the short side. Had the league seeded on RAW
+WINS, M6 measured the cost at **-7.9 points of P(playoffs)** and **-8.1 points of
+P(top-2 seed)** for a 12-game team, with every team otherwise identical — roughly
+eight points of the thing §2.4 calls as valuable as everything else combined.
+
+The standings page ranks on **PCT** with a **GB** column, ESPN's win-percentage
+layout, so the structural handicap does not apply. Basis is the column layout
+rather than an observed ordering, since the season has not started; the first
+weeks with unequal games will confirm it beyond doubt.
+
+§2.5 is closed: no handicap. Marginal wins are worth the same to me as to anyone."""
 KEEPER_COUNT = 0
 IS_KEEPER_LEAGUE = False     # settings: keeper_count == 0 -> FULL REDRAFT
 WAIVER_TYPE = "rolling_priority"       # settings: faab == false

@@ -138,10 +138,13 @@ def test_the_test_itself_has_a_low_ceiling():
 
 
 # ─── output ─────────────────────────────────────────────────────────────────
-def test_season_sim_json_ships_both_rules_and_says_the_rule_is_unresolved():
+def test_season_sim_json_ships_both_rules_and_names_the_confirmed_one():
+    """Both rules stay simulated even though the rule is now known — the
+    sensitivity is what made confirming it worth doing."""
     d = SB.build(season=2026, n_sims=3000)
     assert set(d["by_seeding_rule"]) == {"wins", "win_pct"}
-    assert "UNRESOLVED" in d["seeding_rule_status"]
+    assert d["seeding_rule"] == "win_pct"
+    assert "CONFIRMED" in d["seeding_rule_status"]
     assert d["variance_model"]["within_team_weekly_sd"] > d["variance_model"]["between_team_talent_sd"]
 
 
@@ -152,3 +155,26 @@ def test_championship_delta_is_available_for_downstream_jobs(equal_means):
     d = SB.championship_delta(equal_means, better, n_sims=4000)
     assert d["delta_title"] > 0.02
     assert d["delta_playoffs"] > 0.0
+
+
+def test_seeding_rule_is_confirmed_as_win_percentage():
+    """§2.5 CLOSED. The standings page ranks on PCT with a GB column, so the
+    12-game teams carry no structural handicap.
+
+    Had it been raw wins, M6 measured the cost at ~8 points of both P(playoffs)
+    and P(top-2 seed) — which is why this was worth confirming rather than
+    assuming.
+    """
+    from ff_agent.config import SEEDING_RULE
+    assert SEEDING_RULE == "win_pct"
+    assert SEEDING_RULE in SIM.SEEDING_RULES
+
+
+def test_confirmed_rule_removes_the_unequal_games_handicap(equal_means):
+    """Under the confirmed rule, playing 12 games instead of 13 costs nothing."""
+    from ff_agent.config import SEEDING_RULE
+    r = SIM.simulate(equal_means, season=2026, n_sims=20000, seeding_rule=SEEDING_RULE)
+    tbl = r.table().join(SCH.games_played(2026).select("team", "games"), on="team")
+    by = tbl.group_by("games").agg(pl.col("p_playoffs").mean().alias("p"))
+    d = dict(zip(by["games"].to_list(), by["p"].to_list()))
+    assert abs(d[12] - d[13]) < 0.02, f"12-game {d[12]:.3f} vs 13-game {d[13]:.3f}"

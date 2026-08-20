@@ -6,7 +6,7 @@ import json
 
 import polars as pl
 
-from ff_agent.config import ARTIFACTS_DIR, MY_TEAM_NAME, SEASON
+from ff_agent.config import ARTIFACTS_DIR, MY_TEAM_NAME, SEASON, SEEDING_RULE
 from ff_agent.season import evaluate as EV
 from ff_agent.season import schedule as SCH
 from ff_agent.season import simulate as SIM
@@ -32,11 +32,13 @@ def build(
         "n_sims": n_sims,
         "equal_strength_baseline": equal_strength,
         "games_played": SCH.games_played(season).to_dicts(),
+        "seeding_rule": SEEDING_RULE,
         "seeding_rule_status": (
-            "UNRESOLVED (§2.5). Both are simulated. With equal teams, raw wins "
-            "costs a 12-game team about 8 points of playoff probability and 8 of "
-            "top-2 probability versus win percentage — so this is worth confirming "
-            "on the standings page, not a technicality."
+            "CONFIRMED 2026-08-20 as win percentage — the standings page ranks on "
+            "PCT with a GB column. §2.5's structural handicap does NOT apply. Both "
+            "rules remain simulated because the sensitivity is what made this worth "
+            "confirming: on raw wins a 12-game team would give up ~8 points of both "
+            "P(playoffs) and P(top-2 seed)."
         ),
         "by_seeding_rule": out,
         "sensitivity": SIM.seeding_sensitivity(means, season=season, n_sims=n_sims).to_dicts(),
