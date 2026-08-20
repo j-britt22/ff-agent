@@ -99,17 +99,34 @@ Zero unmatched across all five populations: 2026 draftable pool (995 players +
   `tests/test_scoring_gate.py` so a NEW disagreement fails the suite.
 - **Layer C** attributes any mismatch to a specific rule rather than a bare total.
 
-**Next: M3, the projection model.**
+**M3 (projection model) — COMPLETE 2026-08-20.** 162 tests pass.
+Gate: blended projections beat raw consensus on rank correlation, **walk-forward
+(weight fitted on prior seasons only): 4/4 seasons, +0.0034 mean Spearman**.
+The gain is real but SMALL, and it is a plateau not a peak — every weight in
+0.05-0.20 wins all five backtested seasons.
+
+- Consensus 0.761 · model alone 0.687 · blend 0.767 (mean Spearman, 2021-2025).
+- **The model alone is materially WORSE than consensus.** §7.2 step 4's "blend,
+  don't replace" is not a stylistic preference — consensus encodes offseason news
+  no historical model can see. Default weight is **0.12** to our model.
+- The pre-registered 0.35 merely tied. The model deserves less weight than
+  intuition suggested, which is itself the finding.
+- Per-position weight fitting was WORSE (5/12) than a single global weight (4/4):
+  four weights fitted on three seasons overfits. Use one global weight.
+
+**Next: M3b (xFP/xTD), then M4 (VOR + tiers + board).**
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
 uv run python -m ff_agent.cli byes        # §2.1 free-bye teams
 uv run python -m ff_agent.cli crosswalk   # THE GATE — needs .env
 uv run python -m ff_agent.cli score       # M2 GATE — recomputed scores vs ESPN
+uv run python -m ff_agent.cli project     # M3 — build projections for the season
+uv run python -m ff_agent.cli project --backtest   # M3 GATE — walk-forward
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 140 pass
+uv run pytest                             # 162 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -152,6 +169,34 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   sample, so categories appearing only in later rows vanish — this silently
   understated every D/ST touchdown until the totals disagreed. Fixed columns or
   a JSON string.
+
+**M3 findings:**
+- **§3.1's VOR table understates QB.** Measured on 10 seasons recomputed under §1
+  scoring: QB18 is **232.5**, not the ~265 §3.1 guessed, so QB VOR is **181.9**
+  against RB's **155.9**. §3.1 concluded QB and RB were "near-tied"; they are not
+  — QB is clearly ahead. (Elite values from realised data are upward-biased, so
+  trust the replacement levels more than the elite figures; M4 should recompute
+  VOR from PROJECTED points.)
+- **Use superflex ECR (`ecr_type="rsf"`), never standard.** 11 QBs in the top 24
+  vs 0 for standard. nflverse carries weekly ECR snapshots back to Dec 2019,
+  which is what makes a no-lookahead preseason backtest possible at all.
+- **The FantasyPros scrape has artifacts that land at the very top.** A literal
+  "Player Name" placeholder ranked 12th overall, and single-expert entries
+  (`sd == 0`) ranked 8th and 42nd. Filtered explicitly, never silently.
+- **ESPN's SEASON projections report yardage PER GAME** while every other field
+  is a season total (Gibbs: `rushingYards 80.74` beside 283 carries at 4.85/carry
+  = 1372.6 = 80.74 x 17). Read literally, every projection is ~17x wrong.
+- ESPN's kicker projection merges 50-59 and 60+ into one `50Plus` bucket, but §1
+  pays 5 and 6 respectively — it collapses exactly the distinction ADD-§E says is
+  worth money here.
+- **ADD-§B confirmed on our data**: volume averages **0.584** year-over-year,
+  efficiency **0.292**. WR/TE target share ~0.77, RB carries/game 0.776, QB sack
+  rate 0.394 (ADD-§B.1 predicted ~0.50) and it correlates **-0.134** with next-season
+  PPG — sack-prone QBs are worse, and this league charges them twice.
+- **Per-game rates alone are a trap.** They ranked Jimmy Garoppolo and Joe Milton
+  III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
+- Historical actuals are recomputed under **current** rules, deliberately opposite
+  to M2 validation which uses each season's own rules.
 
 **M1 findings worth remembering:**
 - Sacks taken is **`sacks_suffered`**. Not `sacks` (doesn't exist), and NOT

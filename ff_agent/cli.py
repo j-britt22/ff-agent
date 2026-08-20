@@ -5,6 +5,8 @@
     uv run python -m ff_agent.cli byes        # bye table + §2.1 free-bye teams
     uv run python -m ff_agent.cli crosswalk   # resolve the ESPN pool, assert, report
     uv run python -m ff_agent.cli score       # M2 GATE — scores vs ESPN
+    uv run python -m ff_agent.cli project     # M3 — build projections
+    uv run python -m ff_agent.cli project --backtest   # M3 GATE — beats consensus?
     uv run python -m ff_agent.cli settings    # refresh league settings JSON
     uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
     uv run python -m ff_agent.cli offline     # prove the offline path works
@@ -18,7 +20,8 @@ import sys
 import polars as pl
 
 from ff_agent.config import (
-    FREE_BYE_WEEKS, HISTORY_SEASONS, LAST_SEASON, SEASON, have_espn_credentials,
+    ARTIFACTS_DIR, FREE_BYE_WEEKS, HISTORY_SEASONS, LAST_SEASON, SEASON,
+    have_espn_credentials,
 )
 from ff_agent.data import byes as byes_mod
 from ff_agent.data import cache, crosswalk as cw
@@ -196,6 +199,39 @@ def cmd_score(args) -> int:
     return 0 if a_bad.height == 0 else 1
 
 
+def cmd_project(args) -> int:
+    """M3: build projections, or run the backtest gate."""
+    from ff_agent.projections import backtest as B
+    from ff_agent.projections import board_inputs as BI
+
+    if args.backtest:
+        wf = B.walk_forward(seasons=(2021, 2022, 2023, 2024, 2025), per_position=False)
+        print("WALK-FORWARD backtest — blend weight fitted on PRIOR seasons only")
+        with WIDE:
+            print(wf)
+        won, n = int((wf["delta"] > 0).sum()), wf.height
+        print(f"\n  blend beat consensus in {won}/{n} seasons, "
+              f"mean delta {wf['delta'].mean():+.4f} Spearman")
+        print("\nFixed-weight robustness (is it a plateau or a knife-edge?):")
+        with WIDE:
+            print(B.weight_sweep(weights=(0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0)))
+        return 0 if won == n else 1
+
+    season = args.season or SEASON
+    b = BI.build(season)
+    out = ARTIFACTS_DIR / f"projections_{season}.parquet"
+    b.write_parquet(out)
+    print(f"{b.height} players projected for {season} -> {out}")
+    with WIDE:
+        print(b.head(args.top).select(
+            "name", "position", "team", "ecr", "consensus_points",
+            "model_points", "blended_points", "free_bye_week_5_or_14", "playoff_sos"))
+    fb = b.head(60).filter(pl.col("free_bye_week_5_or_14"))
+    print(f"\n§2.1 free-bye players inside the top 60: {fb.height}")
+    print("  " + ", ".join(fb["name"].to_list()))
+    return 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -256,6 +292,10 @@ def main(argv=None) -> int:
     sub.add_parser("byes").set_defaults(fn=cmd_byes)
     sub.add_parser("crosswalk").set_defaults(fn=cmd_crosswalk)
     p = sub.add_parser("score"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_score)
+    p = sub.add_parser("project")
+    p.add_argument("--season", type=int); p.add_argument("--top", type=int, default=20)
+    p.add_argument("--backtest", action="store_true")
+    p.set_defaults(fn=cmd_project)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)
