@@ -138,7 +138,12 @@ But three sub-findings are worth more than the headline would have been:
    −1/sack league that is the durable, unpriced edge §3.3 predicted, and it is
    the one piece of xFP that should reach the board.
 
-**Next: M4 (VOR + tiers + bye adjustment → `board.json`).**
+**M4 (VOR + tiers + bye adjustment → `board.json`) — COMPLETE 2026-08-20.**
+192 tests pass. `uv run python -m ff_agent.cli board` writes `artifacts/board.json`
+and prints the §11 review: divergences with attributed reasons, bye lift, the
+QB-count decision, and §10's sanity alarms.
+
+**Next: M5 (opponent model → `opponents.json`).**
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
@@ -148,10 +153,11 @@ uv run python -m ff_agent.cli score       # M2 GATE — recomputed scores vs ESP
 uv run python -m ff_agent.cli project     # M3 — build projections for the season
 uv run python -m ff_agent.cli project --backtest   # M3 GATE — walk-forward
 uv run python -m ff_agent.cli xfp --validate      # M3b — xFP + validity tests
+uv run python -m ff_agent.cli board       # M4 — VOR/tiers/byes -> board.json
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 174 pass
+uv run pytest                             # 192 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -222,6 +228,33 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+
+**M4 findings:**
+- **The flex has NEVER started a tight end.** 364 flex starts across 2023–2025:
+  56.3% RB, 43.7% WR, **0.0% TE**. §7.3 estimated ~4 RB / 4 WR / 1 TE. So
+  replacement is **TE9** (not TE10) and **RB23.1** (not RB22); WR22 confirmed.
+  Coherent with §3.4 — half-PPR plus 0.05/carry pushes flex value to backs.
+  Caveat: measured in 8- and 10-team seasons, so direction is safe, level less so.
+- **The §2.1 bye adjustment is tiebreaker-sized, not "first-class".** Computed
+  honestly it is one week of VOR: mean **1.79 points** for free-bye players in the
+  top 100, max 4.63, against VORs of 100–170. It still produces a visible rank
+  lift (+8.1 mean rank gain vs ECR against +4.9 for everyone else) because players
+  bunch tightly at the margins — but §2.1 hoped for more than the arithmetic gives.
+  Only 4 teams qualify in 2026, which concentrates it.
+- **The sack edge needed an explicit board term or it would have been lost.**
+  Consensus prices sacks at zero (§3.3), and the M3 opportunity model DROPPED
+  `sack_rate` for falling under the 0.45 stability cutoff. So `sack_adjustment =
+  −0.434 × prior_sacks_over_expected` for QBs, using M3b's measured persistence.
+  Range in 2026: **−8.3 to +9.2 points**. It moved Lamar Jackson from #2 to #4.
+- **2026 QB-count answer: TWO.** Josh Allen (bye wk 7) and Lamar Jackson (wk 13) —
+  neither bye is covered by my weeks 5/14, so QB3 would start 2 weeks and is worth
+  17.9 points, against 26.4 points of upside from the best non-QB stash (§2.1, §3.2).
+- Board is QB-heavy at the top (12 QB / 10 RB / 6 WR / 2 TE in the top 30),
+  following from QB VOR leading and 18 QB starters. **This is the thing to
+  sanity-check** — if it is wrong, it is wrong in the first two rounds.
+- Tier breaks are re-run under ±5% projection noise; `tier_stability` records how
+  often each survives, so a cliff that exists at only one exact projection is
+  visible as false precision.
 
 **M3b findings:**
 - `ff_opportunity` lives in a **separate repo** (`nflverse/ffopportunity`), covers

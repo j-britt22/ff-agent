@@ -271,6 +271,55 @@ def cmd_xfp(args) -> int:
     return 0
 
 
+def cmd_board(args) -> int:
+    """M4: VOR + tiers + bye adjustment -> board.json, plus the review report."""
+    from ff_agent.board import build as BB
+    from ff_agent.board import replacement as RR
+    from ff_agent.board import review as RV
+
+    season = args.season or SEASON
+    b, path = BB.write_board(season)
+    print(f"board: {b.height} players -> {path}\n")
+
+    print("replacement levels (§7.3, flex allocated by MEASURED usage):")
+    print("  measured flex share:",
+          {k: round(v, 3) for k, v in RR.flex_share().items()},
+          " (§7.3 assumed ~4 RB / 4 WR / 1 TE)")
+    with WIDE:
+        print(RR.replacement_table(
+            __import__("ff_agent.projections.calibration", fromlist=["x"])
+            .smooth_curve(
+                __import__("ff_agent.projections.calibration", fromlist=["x"])
+                .rank_points_curve(seasons=[s for s in range(2016, season)]))))
+
+    print(f"\nTOP {args.top}")
+    with WIDE:
+        print(b.head(args.top).select(
+            "overall_rank", "name", "position", "team", "vor", "bye_adjustment",
+            "sack_adjustment", "tier", "players_remaining_in_tier", "ecr",
+            "rank_vs_ecr"))
+
+    print("\n§11 REVIEW — divergences from consensus, with reasons:")
+    with WIDE:
+        print(RV.divergences(b, top=50).select(
+            "overall_rank", "name", "position", "ecr", "rank_vs_ecr",
+            "vs_consensus", "reason"))
+
+    print("\n§11 — do week 5/14 bye players visibly rise?")
+    with WIDE:
+        print(RV.bye_lift(b))
+
+    print("\n§2.1 — QB COUNT DECISION")
+    for k, v in RV.qb_count_decision(b).items():
+        print(f"  {k}: {v}")
+
+    alarms = RV.sanity_alarms(b)
+    print("\n§10 SANITY ALARMS: " + ("none" if not alarms else ""))
+    for a in alarms:
+        print(f"  !! {a}")
+    return 1 if alarms else 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -339,6 +388,9 @@ def main(argv=None) -> int:
     p.add_argument("--season", type=int); p.add_argument("--top", type=int, default=12)
     p.add_argument("--validate", action="store_true")
     p.set_defaults(fn=cmd_xfp)
+    p = sub.add_parser("board")
+    p.add_argument("--season", type=int); p.add_argument("--top", type=int, default=25)
+    p.set_defaults(fn=cmd_board)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)
