@@ -114,7 +114,31 @@ The gain is real but SMALL, and it is a plateau not a peak — every weight in
 - Per-position weight fitting was WORSE (5/12) than a single global weight (4/4):
   four weights fitted on three seasons overfits. Use one global weight.
 
-**Next: M3b (xFP/xTD), then M4 (VOR + tiers + board).**
+**M3b (xFP/xTD) — COMPLETE 2026-08-20. The headline test FAILED, deliberately
+recorded rather than tuned away.**
+
+ADD-§I-3b asks whether xFP predicts next-season points better than prior-season
+points does. **It does not, at any position** — QB −0.029, RB −0.035, WR −0.009,
+TE −0.029. So **xFP does NOT enter the point projection.** It survives as a
+diagnostic only. ADD-§H already lists five things not to build; this is the sixth,
+and it was found by testing rather than assuming.
+
+But three sub-findings are worth more than the headline would have been:
+
+1. **xFP IS more stable** — the other half of ADD-§A's claim holds at every
+   position (xFP→next xFP beats points→next points: QB .527/.479, WR .752/.700,
+   TE .732/.704, RB .707/.698). ADD-§A conflates "more stable" with "more
+   predictive"; on this data only the first is true. Stripping luck from last
+   year also strips demonstrated skill, and some of that skill persists.
+2. **xTD beats actual TD for WR and TE, but NOT for RB and QB.** The asymmetry is
+   the finding: RB touchdowns come from goal-line ROLE, a durable team
+   assignment, not luck. Use the TD-regression fade for receivers only.
+3. **Sacks-over-expected is a TRAIT; TD-over-expected is luck.** SOE carries
+   forward at **0.434**, TDOE at **0.104** — four times the persistence. In a
+   −1/sack league that is the durable, unpriced edge §3.3 predicted, and it is
+   the one piece of xFP that should reach the board.
+
+**Next: M4 (VOR + tiers + bye adjustment → `board.json`).**
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
@@ -123,10 +147,11 @@ uv run python -m ff_agent.cli crosswalk   # THE GATE — needs .env
 uv run python -m ff_agent.cli score       # M2 GATE — recomputed scores vs ESPN
 uv run python -m ff_agent.cli project     # M3 — build projections for the season
 uv run python -m ff_agent.cli project --backtest   # M3 GATE — walk-forward
+uv run python -m ff_agent.cli xfp --validate      # M3b — xFP + validity tests
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 162 pass
+uv run pytest                             # 174 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -197,6 +222,22 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+
+**M3b findings:**
+- `ff_opportunity` lives in a **separate repo** (`nflverse/ffopportunity`), covers
+  2016–2025, uses gsis ids, and exposes expected COMPONENTS — so they can be fed
+  through the M2 engine and priced in §1 instead of its own scoring.
+- Its headline `total_fantasy_points_exp` is **full PPR with 4-point passing TDs**
+  (verified: 0.091 mean abs diff). Every public xFP number is priced for a game
+  nobody in this league is playing — exactly ADD-§A's premise.
+- **It ships the postseason** (weeks 19–22). Compared against regular-season
+  actuals, deep-run players accrue phantom expected points and FPOE goes negative
+  for almost everyone. Filter on `game_type == "REG"` via `game_id`.
+- Null-`player_id` rows aggregate into a phantom player with 400+ games.
+- `model_version` is **pinned to v1.0.0**; `latest` would silently rewrite history.
+- **0.05/carry needs no model** — a carry IS the opportunity, so those points are
+  expected by construction. **−1/sack has no upstream model** and had to be built
+  from dropbacks against an opponent-adjusted, QB-neutral baseline.
 
 **M1 findings worth remembering:**
 - Sacks taken is **`sacks_suffered`**. Not `sacks` (doesn't exist), and NOT

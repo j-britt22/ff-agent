@@ -232,6 +232,45 @@ def cmd_project(args) -> int:
     return 0
 
 
+def cmd_xfp(args) -> int:
+    """M3b: xFP under §1, and the ADD-§I-3b validity test."""
+    from ff_agent.projections import xfp as X
+    from ff_agent.projections import xfp_validity as V
+
+    season = args.season or LAST_SEASON
+    s = X.xfp_season(season)
+    print(f"{season}: xFP for {s.height} players\n")
+    with WIDE:
+        print(s.head(args.top).select(
+            "name", "position", "games", "xfp", "actual_points", "fpoe",
+            "xtd", "actual_td", "sacks_over_expected"))
+
+    if not args.validate:
+        return 0
+
+    print("\n=== ADD-§I-3b: does xFP predict next season better than points? ===")
+    v = V.validity()
+    with WIDE:
+        print(v)
+    wins = v.filter(pl.col("position") != "ALL")["xfp_wins"].any()
+    print("  RESULT: xFP does NOT beat prior-season points at any position."
+          if not wins else "  RESULT: xFP wins somewhere — revisit the conclusion.")
+    print("  xFP therefore stays a DIAGNOSTIC and does not enter the projection.")
+
+    print("\n=== ADD-§A.1: does touchdown luck regress? ===")
+    with WIDE:
+        print(V.td_regression_evidence())
+    print("  xTD beats actual TD for WR/TE (luck regresses) but not RB/QB,"
+          "\n  where goal-line role is a durable team assignment.")
+
+    print("\n=== ADD-§B.1: sacks-over-expected — trait or luck? ===")
+    with WIDE:
+        print(V.sack_trait_evidence())
+    print("  Sack overperformance persists ~4x more strongly than TD"
+          "\n  overperformance. Fade TD luck; price in sack rate (§3.3).")
+    return 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -296,6 +335,10 @@ def main(argv=None) -> int:
     p.add_argument("--season", type=int); p.add_argument("--top", type=int, default=20)
     p.add_argument("--backtest", action="store_true")
     p.set_defaults(fn=cmd_project)
+    p = sub.add_parser("xfp")
+    p.add_argument("--season", type=int); p.add_argument("--top", type=int, default=12)
+    p.add_argument("--validate", action="store_true")
+    p.set_defaults(fn=cmd_xfp)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)
