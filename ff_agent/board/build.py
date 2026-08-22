@@ -74,12 +74,26 @@ def bye_adjustment(vor: pl.Expr, free_bye: pl.Expr) -> pl.Expr:
     return pl.when(free_bye).then((vor / GAMES).clip(lower_bound=0.0)).otherwise(0.0)
 
 
-def build(season: int = SEASON, prior_season: int | None = None) -> pl.DataFrame:
+def build(
+    season: int = SEASON,
+    prior_season: int | None = None,
+    starter_slots: dict[str, int] | None = None,
+    n_teams: int | None = None,
+) -> pl.DataFrame:
+    """Build the draft board.
+
+    ``starter_slots``/``n_teams`` exist so another league can be boarded: VOR is
+    measured against the STARTER replacement, so the league's shape decides
+    where replacement sits. Defaulting them reproduces §1 exactly.
+    """
+    from ff_agent.config import N_TEAMS as _DEFAULT_TEAMS
+
+    n_teams = _DEFAULT_TEAMS if n_teams is None else n_teams
     proj = BI.build(season)
     curve = CAL.smooth_curve(
         CAL.rank_points_curve(seasons=[s for s in range(2016, season)])
     )
-    repl = R.replacement_table(curve)
+    repl = R.replacement_table(curve, starter_slots=starter_slots, n_teams=n_teams)
 
     prior = prior_season or (season - 1)
     xf = X.xfp_season(prior).select(

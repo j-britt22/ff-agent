@@ -575,6 +575,56 @@ def cmd_draft(args) -> int:
     return 0
 
 
+def cmd_setup(args) -> int:
+    """First-run check for a league that is not the one §1 describes.
+
+    Everything this does is read-only. It exists so somebody can find out that
+    their cookies are wrong, or their league starts linebackers, at a moment
+    that is not sixty seconds before their draft.
+    """
+    import time
+
+    from ff_agent.data import espn
+    from ff_agent.draft import pool as DPL
+    from ff_agent.live import profile as PR
+
+    season = args.season or SEASON
+
+    print("1. ESPN credentials")
+    v = espn.verify_credentials(season)
+    if not v["ok"]:
+        print(f"   FAILED at {v['stage']}\n{v['detail']}")
+        return 2
+    print(f"   OK — {v['league_name']} ({v['n_teams']} teams)")
+
+    print("\n2. Your league")
+    try:
+        prof = PR.detect(season, my_team_name=args.team)
+    except PR.UnsupportedLeague as e:
+        print(f"   CANNOT RUN:\n   {e}")
+        return 2
+    print("   " + prof.summary().replace("\n", "\n   "))
+    for w in prof.warnings:
+        print(f"   !! {w}")
+
+    print("\n3. Your draft board")
+    cache = ARTIFACTS_DIR / f"pool_league_{prof.league_id}.parquet"
+    t0 = time.perf_counter()
+    board = PR.build_board_for(prof, season)
+    pool = DPL.build_pool(season, n_teams=prof.n_teams, board=board)
+    DPL.save_pool(pool, ARTIFACTS_DIR, path=cache)
+    print(f"   built {pool.n} players in {time.perf_counter() - t0:.0f}s -> {cache.name}")
+    top = pool.df.head(5)
+    for n, ps, vor in zip(top["name"], top["position"], top["vor"]):
+        print(f"     {ps:4s} {n:24s} vor {vor:6.1f}")
+
+    print("\n4. Ready")
+    print(f"   On draft day, once you know your slot (1..{prof.n_teams}):")
+    print(f"     uv run python -m ff_agent.cli gui --auto --slot N")
+    print("\n   Nothing in this tool ever submits to ESPN. You click. (§0.1)")
+    return 0
+
+
 def cmd_gui(args) -> int:
     """M9 in a browser. Same engine as `cli live`, read at a glance instead of
     scrolled — and with an optional read-only poll of ESPN's draft feed.
@@ -599,15 +649,54 @@ def cmd_gui(args) -> int:
         return 2
 
     t0 = time.perf_counter()
-    pool = DPL.load_pool(ARTIFACTS_DIR)
-    if pool is None:
-        print("no cached pool — building it (run `cli plans` before draft day)")
-        pool = DPL.build_pool(season)
-        DPL.save_pool(pool, ARTIFACTS_DIR)
-    managers = DDB.managers_for_slot(args.slot)
-    state = new_state(pool, args.slot, managers)
-    resolver = Resolver(pool)
-    ctx = AD.load_context(season, pool, managers, state.rounds)
+    prof = None
+    if args.auto:
+        # Read the league instead of trusting §1's constants. This is what makes
+        # the tool runnable by somebody in a different league.
+        from ff_agent.live import profile as PR
+
+        try:
+            prof = PR.detect(season, my_team_name=args.team)
+        except PR.UnsupportedLeague as e:
+            print(f"\nCannot run against this league:\n  {e}")
+            return 2
+        print("\n" + prof.summary())
+        for w in prof.warnings:
+            print(f"  !! {w}")
+        if args.slot > prof.n_teams:
+            print(f"\nslot {args.slot} is outside 1..{prof.n_teams}")
+            return 2
+
+    if prof is None:
+        pool = DPL.load_pool(ARTIFACTS_DIR)
+        if pool is None:
+            print("no cached pool — building it (run `cli plans` before draft day)")
+            pool = DPL.build_pool(season)
+            DPL.save_pool(pool, ARTIFACTS_DIR)
+        managers = DDB.managers_for_slot(args.slot)
+        state = new_state(pool, args.slot, managers)
+        resolver = Resolver(pool)
+        ctx = AD.load_context(season, pool, managers, state.rounds)
+    else:
+        cache = ARTIFACTS_DIR / f"pool_league_{prof.league_id}.parquet"
+        pool = DPL.load_pool(ARTIFACTS_DIR, path=cache)
+        if pool is None:
+            print("\n  building this league's board (one time, needs network)…")
+            board = PR.build_board_for(prof, season)
+            pool = DPL.build_pool(season, n_teams=prof.n_teams, board=board)
+            DPL.save_pool(pool, ARTIFACTS_DIR, path=cache)
+        managers = PR.managers_for_slot(prof, args.slot)
+        state = new_state(pool, args.slot, managers, rounds=prof.roster_total)
+        resolver = Resolver(pool)
+        try:
+            ctx = AD.load_context(season, pool, managers, state.rounds)
+        except Exception as e:
+            # No usable draft history (a first-year league is the common case).
+            # M5's tilts are worth ~2 points of the edge; the board is worth the
+            # rest, so this degrades rather than refusing to run.
+            print(f"  no opponent history ({type(e).__name__}) — "
+                  f"drafting everyone off consensus")
+            ctx = PR.neutral_context(pool, managers, state.rounds, season)
     log = LG.SessionLog(LG.session_path(season, args.slot))
     log.write("session", season=season, slot=args.slot, managers=managers,
               pool_size=pool.n, interface="gui")
@@ -830,8 +919,16 @@ def main(argv=None) -> int:
     p.add_argument("--season", type=int)
     p.add_argument("--qb-cap", type=int, dest="qb_cap", default=3)
     p.set_defaults(fn=cmd_live)
+    p = sub.add_parser("setup")
+    p.add_argument("--season", type=int)
+    p.add_argument("--team", help="your team name, if SWID cannot identify you")
+    p.set_defaults(fn=cmd_setup)
     p = sub.add_parser("gui")
     p.add_argument("--slot", type=int, required=False)
+    p.add_argument("--auto", action="store_true",
+                   help="detect the league from ESPN instead of using §1's "
+                        "constants — required for any league but Jordan's")
+    p.add_argument("--team", help="your team name, if SWID cannot identify you")
     p.add_argument("--season", type=int)
     p.add_argument("--qb-cap", type=int, dest="qb_cap", default=3)
     p.add_argument("--port", type=int, default=8777)

@@ -192,6 +192,35 @@ still prompts and never guesses.
 - Stdlib and system fonts only: §0.3 needs this to work offline, and a webfont
   would fall back mid-draft.
 
+**Runnable against ANY ESPN league — ADDED 2026-08-22.** 346 tests pass.
+`ff_agent/live/profile.py` reads the league's shape from ESPN instead of
+trusting §1's constants, so the tool can be handed to somebody in a different
+league (`SETUP_ANY_LEAGUE.md`).
+- **Detection independently reproduces EVERY §1 constant** — team count, all
+  seven starter slots, bench 7 / IR 1, the position maxima, byes {5,14},
+  6 playoff teams, redraft. `tests/test_profile.py` asserts this, which is
+  simultaneously a regression guard and the evidence the ENGINE was never
+  league-specific; only `config.py` was. The auto-built board is **identical to
+  the shipped one in the top 40, name and VOR**.
+- **`espn_api` does not expose position limits at all.** They live in the raw
+  `mSettings` endpoint under `rosterSettings.positionLimits`, keyed by ESPN's
+  numeric position ids (`-1` = no limit). Without them M7's failure returns:
+  eight QBs, no TE, ~50 points a week. A league whose caps cannot be read is
+  warned about loudly rather than run uncapped.
+- **Identity is the SWID cookie, not the team name.** Names are mutable — §1's
+  "A Chane Reaction" is "TBD" now — so the logged-in account is what says which
+  team is yours. `--team` is a fallback for co-owned or orphaned accounts.
+- **VOR replacement had to become a parameter.** It is measured against the
+  STARTER replacement, so a 1-QB or 12-team league gets a genuinely different
+  board, not a rescaled one: QB18/RB23.1 here, QB12/RB30.8 for 1-QB 12-team.
+  `replacement_ranks(starter_slots=...)`; the default is byte-identical.
+- **IDP and exotic slots are REFUSED, not approximated** (§10). The projections
+  cover QB/RB/WR/TE/K/D-ST, so a league starting linebackers would get a
+  confident wrong board. Keeper leagues run but warn.
+- A first-year league with no draft history degrades to `neutral_context` —
+  everyone drafts off consensus, stated out loud. M7 measured that arm at
+  +29.9 weekly points against the full model's +32.1, so the loss is small.
+
 **Next: M10 (in-season jobs incl. `/week14`).**
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
@@ -260,6 +289,8 @@ uv run python -m ff_agent.cli plans       # M8 — plan_1..9.json (PRECOMPUTE)
 uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compute
 uv run python -m ff_agent.cli live --slot 6    # M9 — the live draft loop (terminal)
 uv run python -m ff_agent.cli gui --slot 6     # M9 — the SAME loop in a browser
+uv run python -m ff_agent.cli setup            # ANY league: preflight + build its board
+uv run python -m ff_agent.cli gui --auto --slot 6  # ANY league: detect, don't assume §1
 uv run python -m ff_agent.cli mock             # M9 GATE — replay 2025 live
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning

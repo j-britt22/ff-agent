@@ -346,7 +346,7 @@ def build_pool(
 POOL_FILE = "draft_pool.parquet"
 
 
-def save_pool(pool: DraftPool, artifacts_dir) -> str:
+def save_pool(pool: DraftPool, artifacts_dir, path=None) -> str:
     """Persist the assembled pool.
 
     Rebuilding it means rebuilding M4's whole board — about five seconds, and it
@@ -354,13 +354,16 @@ def save_pool(pool: DraftPool, artifacts_dir) -> str:
     §5 budgets the T-60 path at five seconds total, so the live loop reads this
     instead.
     """
-    path = artifacts_dir / POOL_FILE
+    path = (artifacts_dir / POOL_FILE) if path is None else path
     pool.df.write_parquet(path)
     return str(path)
 
 
-def load_pool(artifacts_dir) -> DraftPool | None:
-    path = artifacts_dir / POOL_FILE
+def load_pool(artifacts_dir, path=None) -> DraftPool | None:
+    # `path` keeps one league's pool from being read as another's:
+    # the board depends on the league's starting lineup, so two
+    # leagues must never share a cache file.
+    path = (artifacts_dir / POOL_FILE) if path is None else path
     if not path.exists():
         return None
     return _to_pool(pl.read_parquet(path))

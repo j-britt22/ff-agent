@@ -71,6 +71,7 @@ def replacement_ranks(
     seasons: tuple[int, ...] = (2023, 2024, 2025),
     n_teams: int = N_TEAMS,
     use_measured: bool = True,
+    starter_slots: dict[str, int] | None = None,
 ) -> dict[str, float]:
     """§7.3's replacement ranks, with the flex allocated by measured usage.
 
@@ -81,25 +82,33 @@ def replacement_ranks(
     A fractional rank is honest: RB23.1 means replacement sits between RB23 and
     RB24, and rounding it away pretends to a precision the estimate lacks.
     """
+    # `starter_slots` lets another league's shape in: replacement is a property
+    # of how many starters the league fields, so a 1-QB or 12-team league has a
+    # different QB replacement and therefore a different board entirely.
+    slots = STARTER_SLOTS if starter_slots is None else starter_slots
     share = flex_share(seasons) if use_measured else dict(SPEC_FLEX_SHARE)
-    flex_slots = STARTER_SLOTS.get("FLEX", 0) * n_teams
+    flex_slots = slots.get("FLEX", 0) * n_teams
     out: dict[str, float] = {}
     for pos in ("QB", "RB", "WR", "TE"):
-        base = STARTER_SLOTS.get(pos, 0) * n_teams
+        base = slots.get(pos, 0) * n_teams
         out[pos] = base + share.get(pos, 0.0) * flex_slots
-    out["DST"] = STARTER_SLOTS.get("DST", 0) * n_teams
-    out["K"] = STARTER_SLOTS.get("K", 0) * n_teams
+    out["DST"] = slots.get("DST", 0) * n_teams
+    out["K"] = slots.get("K", 0) * n_teams
     return out
 
 
 def replacement_table(
-    curve: pl.DataFrame, ranks: dict[str, float] | None = None
+    curve: pl.DataFrame,
+    ranks: dict[str, float] | None = None,
+    starter_slots: dict[str, int] | None = None,
+    n_teams: int = N_TEAMS,
 ) -> pl.DataFrame:
     """Replacement-level §1 points per position, read off the M3 rank curve.
 
     Fractional ranks are interpolated between the two neighbouring integer ranks.
     """
-    ranks = replacement_ranks() if ranks is None else ranks
+    ranks = (replacement_ranks(n_teams=n_teams, starter_slots=starter_slots)
+             if ranks is None else ranks)
     rows = []
     col = ("expected_points_smooth" if "expected_points_smooth" in curve.columns
            else "expected_points")
