@@ -1,4 +1,5 @@
 """Milestone 4 — VOR, tiers, bye adjustment, board.json (§7.3, §7.4, §2.1)."""
+import numpy as np
 import polars as pl
 import pytest
 
@@ -134,6 +135,26 @@ def test_tier_boundaries_survive_perturbation(board):
     """Risk control: a cliff that exists only at one exact projection is false
     precision, not a cliff."""
     assert board["tier_stability"].median() > 0.5
+
+
+def test_tier_stability_is_reproducible_on_the_real_board(board):
+    """The synthetic version of this lives in tests/test_tier_stability.py; this
+    one runs it on the frame the bug was actually found on, which carries the
+    ties and the ragged position sizes a hand-built frame does not.
+
+    Deduped on canonical_id first: board_inputs currently emits 530 rows for 515
+    players, which build() then squares through the tier_stability join. That is
+    a separate defect and it is not what this test is measuring.
+    """
+    df = (board.select("canonical_id", "position", "vor")
+          .unique(subset=["canonical_id"], maintain_order=True))
+    base = T.tier_stability(df, value="vor")
+    perm = np.random.default_rng(0).permutation(df.height).tolist()
+    shuffled = T.tier_stability(df[perm], value="vor")
+    j = base.join(shuffled, on="canonical_id", how="inner", suffix="_shuffled")
+    assert j.height == base.height
+    moved = j.filter(pl.col("tier_stability") != pl.col("tier_stability_shuffled"))
+    assert moved.height == 0, f"{moved.height} of {j.height} players moved"
 
 
 # ─── §2.1 QB count, §10 alarms ──────────────────────────────────────────────
