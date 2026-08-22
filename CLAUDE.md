@@ -180,7 +180,7 @@ uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 256 pass
+uv run pytest                             # 265 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -433,6 +433,30 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
 - Tier breaks are re-run under ±5% projection noise; `tier_stability` records how
   often each survives, so a cliff that exists at only one exact projection is
   visible as false precision.
+- **`tier_stability` WAS ITSELF THE WORST OFFENDER, and a seeded RNG hid it**
+  (found and fixed 2026-08-21). Two `cli board` runs on byte-identical code
+  disagreed on **85 of 515 rows, up to 0.225** — more movement than a real change
+  to the projection layer produced (44 rows), and Gibbs and Chase were in it.
+  The seed was never the problem: the noise vector was drawn once and applied
+  **positionally**, so which perturbation hit which player depended on the
+  frame's row order — and `assign_tiers` builds that order from `unique()` over
+  positions plus a sort on a float column full of ties. Neither is deterministic
+  in polars by default: **7 distinct row orders in 8 calls.** The whole WR block
+  could move from front to back, re-slicing the noise vector for everyone. Now
+  each player's draw is derived from a blake2b digest of `canonical_id`
+  (**never `hash()`** — Python salts string hashing per process, which would
+  reinstate the drift through the back door), so the draw follows the player, not
+  the row. `assign_tiers` also gained `maintain_order=True` on both the
+  `unique()` and the sort. Result: **`artifacts/board.json` is now byte-identical
+  across runs**, and a projection change moves only the rows it actually touched.
+- **The trial count and the reported precision are now tied to each other.**
+  `tier_stability` is a binomial proportion, so its standard error peaks at
+  `0.5/sqrt(trials)`. At the shipped 40 trials that was **0.079** while
+  board.json reported **three decimals** — the function published 79x more
+  precision than it had, which is the exact failure it exists to catch. Now
+  `TRIALS = 400` (se **0.025**, ~0.5s of a ~7s board build) and
+  `STABILITY_DECIMALS = 2`, with a test asserting the grid stays inside
+  `[se/10, se]` so the two constants cannot drift apart again.
 
 **M3b findings:**
 - `ff_opportunity` lives in a **separate repo** (`nflverse/ffopportunity`), covers

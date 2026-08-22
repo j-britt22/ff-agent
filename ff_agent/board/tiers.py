@@ -7,9 +7,14 @@ Tier boundaries are unstable to small projection changes by nature, so
 ``tier_stability`` re-runs the clustering under perturbation and reports how
 often each break survives. A cliff that only appears at one exact projection is
 not a cliff.
+
+That guarantee only holds if the stability number is itself reproducible, which
+until 2026-08-21 it was not: see ``_noise_matrix``.
 """
 
 from __future__ import annotations
+
+import hashlib
 
 import numpy as np
 import polars as pl
@@ -20,6 +25,20 @@ GAP_MULTIPLIER = 2.0
 MIN_TIER_SIZE = 1
 MAX_TIERS = 12
 
+TRIALS = 400
+"""Perturbation trials, chosen against the precision we report, not by feel.
+
+The estimate is ``k / trials``, a binomial proportion whose standard error peaks
+at ``0.5 / sqrt(trials)`` — 0.025 here. The previous 40 trials gave **0.079**,
+so the third decimal in ``artifacts/board.json`` described noise, not a cliff.
+Costs ~0.5s on a 530-row board, against a ~7s board build."""
+
+STABILITY_DECIMALS = 2
+"""Reported precision, tied to TRIALS' standard error (0.025) rather than taste.
+
+Reporting digits the estimator cannot resolve is the exact false precision
+``tier_stability`` exists to prevent, so the two constants move together."""
+
 
 def assign_tiers(
     df: pl.DataFrame,
@@ -29,9 +48,13 @@ def assign_tiers(
 ) -> pl.DataFrame:
     """Add ``tier`` and ``players_remaining_in_tier`` within each position."""
     out = []
-    for pos in df[position_col].unique().to_list():
+    # maintain_order on BOTH: polars' default unique() is a multithreaded hash
+    # and its default sort is unstable, so without these the position blocks and
+    # the tied rows inside them come back in a different order on every call —
+    # measured at 7 distinct row orders in 8 calls on the 2026 board.
+    for pos in df[position_col].unique(maintain_order=True).to_list():
         sub = (df.filter(pl.col(position_col) == pos)
-               .sort(value, descending=True, nulls_last=True))
+               .sort(value, descending=True, nulls_last=True, maintain_order=True))
         vals = sub[value].fill_null(0.0).to_numpy().astype(float)
         if len(vals) < 2:
             out.append(sub.with_columns(pl.lit(1).alias("tier")))
@@ -57,37 +80,82 @@ def assign_tiers(
     )
 
 
+def _noise_matrix(
+    ids: list[str], trials: int, noise_pct: float, seed: int
+) -> np.ndarray:
+    """One reproducible noise vector per PLAYER, keyed on the canonical id.
+
+    Returns ``(len(ids), trials)``, aligned to ``ids`` positionally but derived
+    from the id, so shuffling the frame permutes the rows without changing any
+    player's draw.
+
+    This is the fix for a live reproducibility bug. The draws used to be taken as
+    one ``rng.normal(..., df.height)`` vector applied POSITIONALLY, which quietly
+    made the result a function of row order — and row order is not stable here:
+    ``assign_tiers`` concatenates position blocks in ``unique()`` order and sorts
+    on a float column full of ties. Two consecutive board builds on byte-identical
+    code disagreed on 85 of 515 rows, by up to 0.225, with Gibbs and Chase among
+    them. A number whose job is to expose false precision cannot itself move 0.2
+    between identical runs.
+
+    Keying on the id also buys insensitivity to the POOL: adding a player, or
+    reprojecting one, leaves every other player's draws untouched, so a genuine
+    projection change shows up only where it actually landed.
+    """
+    per_id: dict[str, np.ndarray] = {}
+    for pid in dict.fromkeys(ids):          # dedupe, insertion-ordered
+        # blake2b, not hash(): PYTHONHASHSEED randomises str hashing per process,
+        # which would reintroduce run-to-run drift through the back door.
+        key = int.from_bytes(
+            hashlib.blake2b(str(pid).encode(), digest_size=8).digest(), "big")
+        per_id[pid] = np.random.default_rng([seed, key]).normal(
+            0.0, noise_pct, trials)
+    return np.array([per_id[p] for p in ids])
+
+
 def tier_stability(
     df: pl.DataFrame,
     value: str = "blended_points",
     noise_pct: float = 0.05,
-    trials: int = 40,
+    trials: int = TRIALS,
     seed: int = 17,
 ) -> pl.DataFrame:
     """How often does each player's tier BREAK survive perturbation?
 
     Risk control, not decoration: presenting a cliff that only exists at one
-    exact projection would be false precision.
+    exact projection would be false precision. Reproducible run-to-run and
+    invariant to the frame's row order — both are pinned in
+    ``tests/test_tier_stability.py``.
     """
-    rng = np.random.default_rng(seed)
+    if df["canonical_id"].null_count():
+        raise ValueError(
+            "tier_stability: canonical_id has nulls, and the perturbation is "
+            "keyed on it — a null key would silently share one draw."
+        )
+    ids = df["canonical_id"].to_list()
+    noise = _noise_matrix(ids, trials, noise_pct, seed)
+
     base = assign_tiers(df, value=value).select(
         "canonical_id", "position", pl.col("tier").alias("base_tier")
     )
-    counts: dict[str, int] = {}
-    for _ in range(trials):
+    counts: dict[tuple[str, int], int] = {}
+    for t in range(trials):
         noisy = df.with_columns(
-            (pl.col(value) * (1.0 + pl.Series(
-                rng.normal(0.0, noise_pct, df.height)))).alias(value)
+            (pl.col(value) * (1.0 + pl.Series(noise[:, t]))).alias(value)
         )
-        t = assign_tiers(noisy, value=value)
-        for r in t.select("canonical_id", "tier").to_dicts():
-            key = f"{r['canonical_id']}|{r['tier']}"
+        for key in assign_tiers(noisy, value=value).select(
+            "canonical_id", "tier"
+        ).iter_rows():
             counts[key] = counts.get(key, 0) + 1
-    rows = []
-    for r in base.to_dicts():
-        k = f"{r['canonical_id']}|{r['base_tier']}"
-        rows.append({
+
+    rows = [
+        {
             "canonical_id": r["canonical_id"],
-            "tier_stability": round(counts.get(k, 0) / trials, 3),
-        })
+            "tier_stability": round(
+                counts.get((r["canonical_id"], r["base_tier"]), 0) / trials,
+                STABILITY_DECIMALS,
+            ),
+        }
+        for r in base.to_dicts()
+    ]
     return pl.DataFrame(rows)
