@@ -87,6 +87,28 @@ def fit_all(
     return out
 
 
+OFFSETS_FILE = "scenario_offsets.npz"
+
+
+def save(scen: dict[str, Scenario], artifacts_dir) -> str:
+    """Persist the fitted offsets. Fitting takes ~45s; draft day cannot pay it."""
+    path = artifacts_dir / OFFSETS_FILE
+    np.savez(path, **{k: v.offsets for k, v in scen.items()})
+    return str(path)
+
+
+def load(artifacts_dir) -> dict[str, Scenario] | None:
+    """Read the cached offsets, or None if they were never built."""
+    path = artifacts_dir / OFFSETS_FILE
+    if not path.exists():
+        return None
+    z = np.load(path)
+    return {
+        k: Scenario(k, z[k], DESCRIPTIONS[k], pl.DataFrame())
+        for k in SCENARIOS if k in z
+    }
+
+
 def qb_pressure(scen: dict[str, Scenario]) -> pl.DataFrame:
     """The early-QB multiplier each scenario applies, side by side."""
     qi = PL.POS_INDEX["QB"]

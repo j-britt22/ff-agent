@@ -170,7 +170,13 @@ assertions on joined team fields.
 `uv run python -m ff_agent.cli plans` precomputes; `draft --slot N` is a **file
 read** (§5's T−60 budget is 5 seconds and it is asserted, not hoped for).
 
-**Next: M9 (live draft loop), then M10 (in-season jobs incl. `/week14`).**
+**M9 (live draft loop → `cli live --slot N`) — COMPLETE 2026-08-22.** 326 tests pass.
+Gate (§11 step 9): replay the real 2025 draft through the loop, every pick typed
+by NAME through the manual-entry path. **136/136 resolved, 17 turns advised,
+p95 latency 0.371s against §4's one-second budget, final roster legal.**
+Cold start **0.7s with the network off**.
+
+**Next: M10 (in-season jobs incl. `/week14`).**
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
 must hand over **a concrete shortlist of players to choose from**, not a score or
@@ -236,6 +242,8 @@ uv run python -m ff_agent.cli draftsim            # M7 — draft_sim.json, 9 slo
 uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
 uv run python -m ff_agent.cli plans       # M8 — plan_1..9.json (PRECOMPUTE)
 uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compute
+uv run python -m ff_agent.cli live --slot 6    # M9 — the live draft loop
+uv run python -m ff_agent.cli mock             # M9 GATE — replay 2025 live
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
@@ -310,6 +318,60 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+
+**M9 findings:**
+- **The live loop RE-SIMULATES rather than filtering the plan, and that is
+  affordable.** Measured: simulating the REMAINDER of the draft costs 0.61s at
+  500 sims from pick 40 and 0.27s from pick 100. So `engine.simulate_drafts`
+  gained a `history=` argument (every sim shares the real prefix and diverges
+  after it), and advice conditions on what actually happened instead of on a
+  plan reality has already left behind.
+- **"Candidates with probabilities" COLLAPSES at the current turn.** A
+  deterministic policy has exactly one answer on a known board, so the top
+  candidate is 100% and the sheet says nothing. What decides a pick is the
+  counterfactual: force each option, simulate the rest, compare the roster. The
+  budget is split between the options, so it costs the same total pick-sims.
+  Live example at pick 5 — Josh Allen has the highest VOR on the board (167.5)
+  and is the **third** best choice, because he comes back 97% of the time.
+- **The QB scenario resolves ITSELF once the draft starts.** M8 left 7-10 of 17
+  turns scenario-dependent because one 2-QB draft cannot pin QB timing. But the
+  world is observable: comparing quarterbacks actually taken against each
+  scenario's fitted rate identifies it inside about two rounds, and the sim then
+  runs under that scenario rather than the blend. M8's largest uncertainty is
+  retired at the table.
+- **A query LONGER than the stored name failed every match path.** ESPN shows
+  "James Cook III"; the board says "James Cook". Prefix, surname and substring
+  matching all miss, so typing the name exactly as ESPN displays it matched
+  **nothing**. Found by the replay gate, fixed by stripping an enumerated set of
+  generational suffixes from both sides. Same class: defenses are "Texans D/ST"
+  in ESPN's pool and "HOU D/ST" in the prior-season fallback, so a static
+  32-entry nickname table now resolves either. Neither is the fuzzy matching
+  §0.2 forbids — the transformations are fixed and enumerated, ambiguity still
+  prompts, and **no id resolves without a human looking at it**.
+- **`normalize_team()` ECHOES anything it does not recognise**, so it is always
+  truthy and `normalize_team(q) or nickname(q)` meant the nickname branch never
+  ran. Check membership in `CURRENT_TEAMS` before trusting it.
+- **D/ST had a null `canonical_id` in the entire draft history, every season.**
+  They are stored as NEGATIVE espn ids, which appear nowhere in
+  `canonical_players`. Harmless for positional aggregates (those key on
+  `position`) and fatal for anything identifying the pick — the replay could not
+  place 8 of 136. `resolve_dst()` handles exactly that id form; now all 424
+  historical picks resolve.
+- **TEAM NAMES CHANGE, AND ONE ALREADY DID.** §1 records "A Chane Reaction" for
+  Jeff Boyd; that team is now called **"TBD"**. Every hardcoded name was a join
+  waiting to break — and worse, the two ESPN tables cache independently, so for
+  a while `team_names_by_manager` said "TBD" while `league_schedule` still said
+  "A Chane Reaction". Fixed by resolving **manager → team_id → the schedule's
+  own spelling**: managers are the stable identity (which is how §2.3 already
+  thinks about the league), and team_id is the only field the two tables agree
+  on. The §1 names are now a documented fallback, not the source of truth.
+- **A bare `except Exception: pass` hid a `NameError`** in the first version of
+  that lookup, so it silently returned stale §1 names while appearing to work.
+  Narrowed to the offline/credential errors it was meant to absorb.
+- **§0.1 is asserted, not trusted.** `test_live_package_cannot_write_to_espn`
+  scans every module under `ff_agent/live/` for write verbs and roster-mutation
+  calls, and checks `data/espn.py` exposes none either. This is the milestone
+  where that rule would have been broken.
 
 **M8 findings:**
 - **§2.1's QB COUNT IS THREE, and M4's TWO was wrong for a locatable reason.**

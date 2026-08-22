@@ -92,15 +92,31 @@ def draft_history(seasons: tuple[int, ...] = HISTORY_SEASONS, **kw) -> pl.DataFr
     df = cached("draft_history", fetch, source="espn", **kw)
 
     canon = cw.canonical_players().select(
-        pl.col("espn_id"), pl.col("position").alias("_pos")
+        pl.col("espn_id"),
+        pl.col("position").alias("_pos"),
+        pl.col("canonical_id").alias("_cid"),
+    )
+    # D/ST are stored as NEGATIVE espn ids, which appear nowhere in
+    # canonical_players — so every defense in the league's draft history had a
+    # null canonical_id, in every season. Harmless for the positional aggregates
+    # (which key on `position`), fatal for anything that needs to identify the
+    # pick: the M9 replay could not place 8 of 136 picks. resolve_dst() handles
+    # exactly this id form.
+    dst_ids = df.filter(pl.col("espn_id").str.starts_with("-")).select("espn_id").unique()
+    dst_map = (
+        cw.resolve_dst(dst_ids).select("espn_id", pl.col("canonical_id").alias("_dst_cid"))
+        if dst_ids.height else
+        pl.DataFrame(schema={"espn_id": pl.Utf8, "_dst_cid": pl.Utf8})
     )
     out = (
         df.join(canon, on="espn_id", how="left")
+        .join(dst_map, on="espn_id", how="left")
         .with_columns(
             pl.when(pl.col("espn_id").str.starts_with("-"))
-            .then(pl.lit("DST")).otherwise(pl.col("_pos")).alias("position")
+            .then(pl.lit("DST")).otherwise(pl.col("_pos")).alias("position"),
+            pl.coalesce("_dst_cid", "_cid").alias("canonical_id"),
         )
-        .drop("_pos")
+        .drop("_pos", "_cid", "_dst_cid")
         .with_columns(
             # comparable across 8-, 9- and 10-team drafts
             (pl.col("overall_pick") / pl.col("total_picks")).alias("pick_fraction"),

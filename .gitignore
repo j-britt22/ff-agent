@@ -37,6 +37,8 @@ data/raw/
 artifacts/board.json
 artifacts/plan_*.json
 artifacts/plans_index.json
+artifacts/draft_pool.parquet
+artifacts/scenario_offsets.npz
 artifacts/opponents.json
 artifacts/season_sim.json
 artifacts/draft_sim.json

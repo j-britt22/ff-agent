@@ -343,6 +343,29 @@ def build_pool(
     return _to_pool(df)
 
 
+POOL_FILE = "draft_pool.parquet"
+
+
+def save_pool(pool: DraftPool, artifacts_dir) -> str:
+    """Persist the assembled pool.
+
+    Rebuilding it means rebuilding M4's whole board — about five seconds, and it
+    needs the ESPN draftable pool, which draft-morning WiFi may not provide.
+    §5 budgets the T-60 path at five seconds total, so the live loop reads this
+    instead.
+    """
+    path = artifacts_dir / POOL_FILE
+    pool.df.write_parquet(path)
+    return str(path)
+
+
+def load_pool(artifacts_dir) -> DraftPool | None:
+    path = artifacts_dir / POOL_FILE
+    if not path.exists():
+        return None
+    return _to_pool(pl.read_parquet(path))
+
+
 def _to_pool(df: pl.DataFrame) -> DraftPool:
     # §0.2 again, at the last point before the simulator. The engine marks pool
     # INDICES taken, not people, so a duplicated canonical_id lets two fantasy

@@ -11,6 +11,8 @@
     uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
     uv run python -m ff_agent.cli plans       # M8 — plan_1..9.json (precompute!)
     uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: load, no compute
+    uv run python -m ff_agent.cli live --slot 6    # M9 — the live draft loop
+    uv run python -m ff_agent.cli mock            # M9 GATE — replay 2025 live
     uv run python -m ff_agent.cli settings    # refresh league settings JSON
     uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
     uv run python -m ff_agent.cli offline     # prove the offline path works
@@ -573,6 +575,103 @@ def cmd_draft(args) -> int:
     return 0
 
 
+def cmd_live(args) -> int:
+    """M9: the live draft loop. Manual entry, sub-second advice, never submits."""
+    import time
+
+    from ff_agent.draft import build as DDB
+    from ff_agent.draft import pool as DPL
+    from ff_agent.live import advise as AD
+    from ff_agent.live import log as LG
+    from ff_agent.live import loop as LP
+    from ff_agent.live.entry import Resolver
+    from ff_agent.live.state import new_state
+
+    season = args.season or SEASON
+    if not args.slot:
+        print("--slot is required. You learn it at T-60 (§5).")
+        return 2
+
+    t0 = time.perf_counter()
+    # §5 budgets the T-60 path at five seconds and draft-day WiFi is not
+    # assumed. `cli plans` writes both of these; rebuilding takes ~50s and needs
+    # the network.
+    pool = DPL.load_pool(ARTIFACTS_DIR)
+    if pool is None:
+        print("no cached pool — building it (run `cli plans` before draft day)")
+        pool = DPL.build_pool(season)
+        DPL.save_pool(pool, ARTIFACTS_DIR)
+    managers = DDB.managers_for_slot(args.slot)
+    state = new_state(pool, args.slot, managers)
+    resolver = Resolver(pool)
+    tilt, reach, scen, targets = AD.load_context(season, pool, managers, state.rounds)
+    setup = time.perf_counter() - t0
+
+    log = LG.SessionLog(LG.session_path(season, args.slot))
+    log.write("session", season=season, slot=args.slot, managers=managers,
+              pool_size=pool.n, setup_seconds=round(setup, 2))
+
+    print(f"\nFIRST DOWN SYNDROME — live draft, slot {args.slot} ({season})")
+    print(f"  {pool.n} players · {state.total_picks} picks · ready in {setup:.1f}s")
+    print(f"  logging to {log.path}")
+    print("  type 'help' for commands. NOTHING here is ever submitted to ESPN.\n")
+
+    def show_advice() -> None:
+        a = AD.advise(state, tilt, reach, scen, targets, qb_cap=args.qb_cap)
+        log.recommendation(a, state)
+        print("\n".join(LP._fmt_advice(a, state)))
+
+    if state.my_turn:
+        show_advice()
+
+    while True:
+        try:
+            raw = input(f"[{state.summary()}] > ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nbye — nothing was submitted (§0.1)")
+            return 0
+        reply = LP.handle(state, resolver, raw)
+        for line in reply.lines:
+            print(line)
+        if reply.recorded is not None:
+            who = managers[int(state.order[len(state.history) - 1])]
+            log.pick(state, reply.recorded, who, "manual")
+        if reply.quit:
+            return 0
+        if reply.needs_advice and not state.complete:
+            show_advice()
+        elif state.complete:
+            print("\ndraft complete. " + state.summary())
+            for w in state.alarms():
+                print(f"  !! {w}")
+            return 0
+
+
+def cmd_mock(args) -> int:
+    """§11 step 9's gate: replay a real draft through the live loop."""
+    import json
+
+    from ff_agent.live import replay as RP
+
+    r = RP.run(season=args.season or 2025, write_log=not args.no_log)
+    print(json.dumps(r, indent=2))
+    lat, entry, roster = r["latency"], r["entry"], r["my_roster"]
+    ok = (
+        r["picks_replayed"] == r["actual_picks"]
+        and entry["needed_fallback"] == 0
+        and lat["over_budget"] == 0
+        and roster["legal"]
+    )
+    print("\n" + ("GATE PASSED" if ok else "GATE FAILED"))
+    print(f"  {entry['resolved_by_name']}/{r['actual_picks']} picks resolved by NAME "
+          f"through the manual-entry path")
+    print(f"  {r['turns_advised']} turns advised · p50 {lat['p50']}s · "
+          f"p95 {lat['p95']}s · max {lat['max']}s against a {lat['budget']}s budget")
+    print(f"  final roster {roster['positions']} — "
+          f"{'legal' if roster['legal'] else 'ILLEGAL'}")
+    return 0 if ok else 1
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -663,6 +762,15 @@ def main(argv=None) -> int:
     p.add_argument("--slot", type=int, default=None)
     p.add_argument("--turns", type=int, default=None)
     p.set_defaults(fn=cmd_draft)
+    p = sub.add_parser("live")
+    p.add_argument("--slot", type=int, required=False)
+    p.add_argument("--season", type=int)
+    p.add_argument("--qb-cap", type=int, dest="qb_cap", default=3)
+    p.set_defaults(fn=cmd_live)
+    p = sub.add_parser("mock")
+    p.add_argument("--season", type=int)
+    p.add_argument("--no-log", action="store_true")
+    p.set_defaults(fn=cmd_mock)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)

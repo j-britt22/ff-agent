@@ -83,6 +83,34 @@ downstream error about a missing bye week rather than "this player has no team".
 """
 
 
+TEAM_NICKNAMES: dict[str, str] = {
+    "cardinals": "ARI", "falcons": "ATL", "ravens": "BAL", "bills": "BUF",
+    "panthers": "CAR", "bears": "CHI", "bengals": "CIN", "browns": "CLE",
+    "cowboys": "DAL", "broncos": "DEN", "lions": "DET", "packers": "GB",
+    "texans": "HOU", "colts": "IND", "jaguars": "JAX", "chiefs": "KC",
+    "chargers": "LAC", "rams": "LAR", "raiders": "LV", "dolphins": "MIA",
+    "vikings": "MIN", "patriots": "NE", "saints": "NO", "giants": "NYG",
+    "jets": "NYJ", "eagles": "PHI", "steelers": "PIT", "seahawks": "SEA",
+    "49ers": "SF", "niners": "SF", "buccaneers": "TB", "bucs": "TB",
+    "titans": "TEN", "commanders": "WAS",
+}
+"""Nickname -> abbreviation, for typing a defense at the draft table.
+
+The two sources spell defenses differently — ESPN's live pool says "Texans
+D/ST" and the prior-season fallback builds "HOU D/ST" — so a person typing what
+ESPN shows them matched nothing. A fixed, enumerated table is not the fuzzy
+matching §0.2 forbids; it is the same kind of object as ESPN_TEAM_ALIASES."""
+
+
+def team_from_nickname(text: str | None) -> str | None:
+    if not text:
+        return None
+    for token in text.lower().replace("/", " ").replace(".", " ").split():
+        if token in TEAM_NICKNAMES:
+            return TEAM_NICKNAMES[token]
+    return None
+
+
 def normalize_team(abbr: str | None) -> str | None:
     if not abbr:
         return None

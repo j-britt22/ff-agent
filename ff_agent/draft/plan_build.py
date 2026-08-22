@@ -59,9 +59,11 @@ def build_all(
 ) -> dict:
     DB.assert_teams_match_schedule(season)
     pool = PL.build_pool(season, N_TEAMS)
+    PL.save_pool(pool, ARTIFACTS_DIR)     # M9's live loop reads this (§5, offline)
     tilt, reach = _lookups()
     managers = DB.managers_for_slot(1)
     scen = SC.fit_all(pool, managers, tilt, reach, ROSTER_TOTAL, season)
+    SC.save(scen, ARTIFACTS_DIR)   # M9 loads these instead of refitting (~45s)
 
     # the surrogate and the noise-exploitation constant both come from M7
     edge = DB.decompose_edge(pool, tilt, reach, scen["shipped"].offsets, season=season)

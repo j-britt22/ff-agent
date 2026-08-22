@@ -19,6 +19,7 @@ import polars as pl
 
 from ff_agent.config import (
     ARTIFACTS_DIR, MissingCredentials, SEASON, espn_credentials,
+    normalize_team_name,
 )
 from ff_agent.data.cache import cached
 
@@ -162,6 +163,36 @@ ROSTER_SCHEMA = {
     "team_id": pl.Int64, "fantasy_team": pl.Utf8, "manager": pl.Utf8,
     "espn_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8, "team": pl.Utf8,
 }
+
+
+def team_names_by_manager(year: int = SEASON, **kw) -> pl.DataFrame:
+    """Manager -> the team name ESPN shows for them RIGHT NOW.
+
+    Team names are mutable and managers are not. §1 records "A Chane Reaction"
+    for Jeff Boyd; mid-2026 that team renamed itself "TBD", and every hardcoded
+    name became a join that would fail the moment the schedule cache refreshed —
+    silently in some places, as a KeyError inside the season simulator in
+    others. Managers are the stable key, which is also how §2.3 thinks about the
+    league ("weight the four double-up MANAGERS").
+    """
+    def fetch() -> pl.DataFrame:
+        from ff_agent.opponents.history import _owner_names, canonical_manager
+
+        lg = get_league(year)
+        rows = []
+        for t in lg.teams:
+            names = _owner_names(t)
+            rows.append({
+                "season": year,
+                "team_id": getattr(t, "team_id", None),
+                "team": normalize_team_name(t.team_name),
+                "manager": canonical_manager(names[0]) if names else None,
+            })
+        if not rows:
+            raise RuntimeError(f"no teams for {year}")
+        return pl.DataFrame(rows)
+
+    return cached("espn_team_names", fetch, season=year, source="espn", **kw)
 
 
 def rosters(year: int, **kw) -> pl.DataFrame:

@@ -68,11 +68,10 @@ def picks_with_consensus(hist: pl.DataFrame | None = None) -> pl.DataFrame:
     for season in sorted(h["season"].unique().to_list()):
         s = h.filter(pl.col("season") == season)
         e = _ecr_for(season)
-        canon = __import__("ff_agent.data.crosswalk", fromlist=["x"]).canonical_players()
-        s = s.join(
-            canon.select(pl.col("espn_id"), pl.col("canonical_id")),
-            on="espn_id", how="left",
-        ).join(e, on="canonical_id", how="left")
+        # canonical_id now arrives from draft_history() already resolved, for
+        # D/ST as well as players — joining it again here would drop the D/ST
+        # resolution and reintroduce the nulls.
+        s = s.join(e, on="canonical_id", how="left")
         # consensus rank expressed as a fraction of the same draft
         s = s.with_columns(
             (pl.col("consensus_rank") / pl.col("total_picks")).alias("consensus_fraction")

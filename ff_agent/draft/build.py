@@ -70,16 +70,47 @@ def managers_for_slot(slot: int, n_teams: int = N_TEAMS) -> list[str]:
     return out[:n_teams]
 
 
-def team_name_for(manager: str) -> str:
+def team_name_for(manager: str, season: int = SEASON) -> str:
     """Manager -> fantasy team name, spelled the way the SCHEDULE spells it.
 
-    §1 stores "Hodor\u2019s Hodors" with a curly apostrophe; the league schedule
-    runs every name through ``normalize_team_name`` first. Skipping that here
-    produced a KeyError deep inside the season simulator after all 27 slot runs
-    had already finished.
+    Two ways this has gone wrong, both silent until something deep failed:
+
+    * §1 stores "Hodor\u2019s Hodors" with a curly apostrophe while the schedule
+      normalises it — a KeyError inside the season simulator, after all 27 slot
+      runs had finished.
+    * **Team names change.** §1 records "A Chane Reaction" for Jeff Boyd; that
+      team is now called "TBD". Every hardcoded name is a join waiting to break.
+
+    So the LIVE mapping wins when it is available, and §1 is the fallback.
+    Managers are the stable identity; team names are decoration they can edit.
     """
     if manager == MY_MANAGER:
         return normalize_team_name(MY_TEAM_NAME)
+    try:
+        from ff_agent.config import MissingCredentials
+        from ff_agent.data import espn
+        from ff_agent.data.cache import MissingCacheError, StaleDataError
+        from ff_agent.season import schedule as SCH
+
+        live = espn.team_names_by_manager(season)
+        hit = live.filter(pl.col("manager") == manager)
+        if hit.height == 1:
+            # Go via team_id, not the name. The two ESPN tables are cached
+            # independently and WILL disagree after a rename — one said "TBD"
+            # while the schedule still said "A Chane Reaction". The schedule is
+            # what the season simulator keys on, so its spelling is the answer;
+            # team_id is the only field both agree on.
+            sched = SCH.league_schedule(season)
+            row = sched.filter(pl.col("team_id") == hit["team_id"][0])
+            if row.height:
+                return normalize_team_name(row["team"][0])
+            return normalize_team_name(hit["team"][0])
+    except (MissingCredentials, MissingCacheError, StaleDataError, OSError):
+        # offline, uncached or no credentials — §1 is the documented fallback.
+        # Deliberately NOT a bare `except Exception`: the first version was, and
+        # it silently swallowed a NameError in the fetch, so this function
+        # quietly returned stale §1 names while looking like it worked.
+        pass
     for o in OPPONENTS:
         if H.canonical_manager(o["manager"]) == manager:
             return normalize_team_name(o["team"])

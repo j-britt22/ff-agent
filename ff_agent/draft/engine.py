@@ -132,6 +132,7 @@ def simulate_drafts(
     seed: int = 11,
     adp_sigma: float = PM.ADP_SIGMA,
     pos_offsets: np.ndarray | None = None,
+    history: list[int] | None = None,
 ) -> DraftResult:
     """Run ``n_sims`` drafts. ``managers[my_index]`` is me and uses ``policy``.
 
@@ -140,6 +141,13 @@ def simulate_drafts(
     measured *against the league rate*, so they sum to roughly zero and cannot
     move the aggregate at all: without this term the simulated mix is whatever
     superflex ECR implies, which the M7 gate showed is not what this league does.
+
+    ``history`` is the picks that have ALREADY happened, as pool indices in pick
+    order. Every simulation starts from that board and only the remainder is
+    sampled. This is what makes M9 possible: re-simulating the rest of a draft
+    from pick 40 costs ~0.57s at 500 sims, inside §4's one-second budget, so the
+    live loop can condition on what actually happened instead of filtering a
+    precomputed plan that reality has already diverged from.
     """
     n_teams = len(managers)
     total = n_teams * rounds
@@ -171,7 +179,13 @@ def simulate_drafts(
     my_counts = counts[:, my_index] if my_turns.size else None
     ctx = PolicyState(pool=pool, rounds=rounds, n_teams=n_teams, my_turns=my_turns)
 
-    for k in range(total):
+    start = 0
+    if history:
+        start = _replay(history, pool, order, n_teams, total, avail, picks,
+                        counts, recent, rows)
+        n_recent = min(len(history), PM.RUN_WINDOW)
+
+    for k in range(start, total):
         team = int(order[k])
         pf = (k + 1) / total
 
@@ -216,6 +230,40 @@ def simulate_drafts(
         n_recent = min(n_recent + 1, PM.RUN_WINDOW)
 
     return DraftResult(picks, order, managers, my_index, pool, n_teams, rounds)
+
+
+def _replay(
+    history: list[int], pool, order, n_teams: int, total: int,
+    avail, picks, counts, recent, rows,
+) -> int:
+    """Stamp the picks that really happened into every simulation.
+
+    Every sim shares one prefix — the actual draft — and diverges only after it.
+    Errors here are silent and catastrophic (a player marked available who is
+    already gone shows up as a recommendation for someone else's roster), so the
+    inputs are checked rather than trusted.
+    """
+    if len(history) > total:
+        raise ValueError(
+            f"history has {len(history)} picks but the draft is {total} long"
+        )
+    if len(set(history)) != len(history):
+        dupes = sorted({i for i in history if history.count(i) > 1})
+        names = pool.df["name"].to_list()
+        raise ValueError(
+            "the same player appears twice in the draft history: "
+            + ", ".join(names[i] for i in dupes)
+        )
+    if any(i < 0 or i >= pool.n for i in history):
+        raise ValueError("a history entry is not a valid pool index")
+
+    for k, choice in enumerate(history):
+        picks[:, k] = choice
+        avail[:, choice] = False
+        cpos = pool.pos_idx[choice]
+        counts[:, int(order[k]), cpos] += 1
+        recent[:, k % PM.RUN_WINDOW] = cpos
+    return len(history)
 
 
 def _run_boost(recent: np.ndarray, n_recent: int, pos_idx: np.ndarray) -> np.ndarray:

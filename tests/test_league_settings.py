@@ -98,24 +98,64 @@ def test_dst_middle_buckets_really_do_score_zero(settings):
 
 
 def test_my_schedule_matches_the_spec():
-    """12 games, byes in weeks 5 and 14, four double-up opponents (§2.1, §2.3)."""
-    from ff_agent.data.espn import get_league
+    """12 games, byes in weeks 5 and 14, four double-up opponents (§2.1, §2.3).
+
+    Keyed on MANAGER, not on team name. Team names are editable and one of them
+    already changed: §1 records "A Chane Reaction" for Jeff Boyd and that team is
+    now called "TBD". The structural facts §2.1 and §2.3 depend on — how many
+    games, which weeks are free, who I face twice — are properties of the
+    schedule, not of what somebody called their team this morning.
+
+    A rename is reported, because a stale §1 is worth knowing about; it is not a
+    failure, because nothing downstream depends on the string any more.
+    """
+    from ff_agent.data.espn import get_league, team_names_by_manager
+
     lg = get_league(c.SEASON)
     me = [t for t in lg.teams
           if c.normalize_team_name(t.team_name) == c.MY_TEAM_NAME][0]
     sched = list(getattr(me, "schedule", []) or [])
     assert len(sched) == 14
 
-    expected = {w: o["team"] for o in c.OPPONENTS for w in o["weeks"]}
-    byes = []
+    live = team_names_by_manager(c.SEASON)
+    mgr_of = dict(zip(live["team"].to_list(), live["manager"].to_list()))
+    expected_mgr = {
+        w: __import__("ff_agent.opponents.history", fromlist=["x"])
+        .canonical_manager(o["manager"])
+        for o in c.OPPONENTS for w in o["weeks"]
+    }
+
+    byes, renames = [], []
     for wk, opp in enumerate(sched, start=1):
         name = c.normalize_team_name(getattr(opp, "team_name", None))
         if name == c.MY_TEAM_NAME:      # ESPN encodes a bye as playing yourself
             byes.append(wk)
             continue
-        assert name == c.normalize_team_name(expected[wk]), (
-            f"week {wk}: ESPN says {name!r}, spec says {expected[wk]!r}")
+        assert mgr_of.get(name) == expected_mgr[wk], (
+            f"week {wk}: ESPN team {name!r} is managed by "
+            f"{mgr_of.get(name)!r}, spec expects {expected_mgr[wk]!r}"
+        )
+        spec_name = next(
+            c.normalize_team_name(o["team"]) for o in c.OPPONENTS if wk in o["weeks"]
+        )
+        if name != spec_name:
+            renames.append(f"week {wk}: §1 says {spec_name!r}, ESPN now says {name!r}")
+
     assert byes == sorted(c.MY_BYE_WEEKS) == [5, 14]
+    if renames:
+        print("\n§1 team names are stale (harmless — everything keys on "
+              "manager):\n  " + "\n  ".join(renames))
+
+
+def test_team_names_are_resolved_from_the_league_not_hardcoded():
+    """Names change; managers do not. Pins the fix for the "TBD" rename."""
+    from ff_agent.data.espn import team_names_by_manager
+    from ff_agent.draft import build as DB
+
+    live = team_names_by_manager(c.SEASON)
+    for mgr, team in zip(live["manager"].to_list(), live["team"].to_list()):
+        if mgr:
+            assert DB.team_name_for(mgr) == c.normalize_team_name(team), mgr
 
 
 def test_the_milestone_1_gate_draftable_pool():
