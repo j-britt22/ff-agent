@@ -159,6 +159,10 @@ opponent model fit on **2023–24 only**, pool of 290 against 136 actual picks).
 picks wide (26% of the draft).** Runs at ~11s per slot at 10,000 sims.
 
 **M8 (nine slot plans → `plan_1..9.json`) — COMPLETE 2026-08-21.** 274 tests pass.
+
+**M9 (§0.2 structural guards) — COMPLETE 2026-08-22.** 290 tests pass.
+Guard against fan-out at the tier_stability join and in tier_stability() itself.
+Merged with the tier_stability reproducibility refactor (03d217a).
 `uv run python -m ff_agent.cli plans` precomputes; `draft --slot N` is a **file
 read** (§5's T−60 budget is 5 seconds and it is asserted, not hoped for).
 
@@ -231,7 +235,7 @@ uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compu
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 274 pass
+uv run pytest                             # 290 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
