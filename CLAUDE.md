@@ -176,6 +176,22 @@ by NAME through the manual-entry path. **136/136 resolved, 17 turns advised,
 p95 latency 0.371s against §4's one-second budget, final roster legal.**
 Cold start **0.7s with the network off**.
 
+**Live draft GUI (`cli gui --slot N`) — ADDED 2026-08-22.** 333 tests pass.
+The same engine as `cli live` served over stdlib `http.server`: `DraftState` is
+still the truth, `advise.advise` still makes the call. Ready in **2.1s**, advice
+in ~0.8s. Clicking a recommendation or a board row records that pick; ambiguity
+still prompts and never guesses.
+- **The ESPN poll is a convenience, never truth (§6).** It only ever APPENDS
+  picks it already agrees with; a feed contradicting a typed pick is reported as
+  a conflict and left unapplied. All 555 pool entries resolve from a draft-feed
+  id — defenses via `dst_crosswalk`'s `canonical_id`, a direct join.
+- **§0.1 needed a SECOND guard.** The Python scan covers new modules via
+  `rglob`, but cannot see `ui.html` — and the page is the only thing here making
+  requests from a browser, where the ESPN cookies live. A test now asserts every
+  `fetch()` is a same-origin `/api/` path and no absolute URL appears at all.
+- Stdlib and system fonts only: §0.3 needs this to work offline, and a webfont
+  would fall back mid-draft.
+
 **Next: M10 (in-season jobs incl. `/week14`).**
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
@@ -242,7 +258,8 @@ uv run python -m ff_agent.cli draftsim            # M7 — draft_sim.json, 9 slo
 uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
 uv run python -m ff_agent.cli plans       # M8 — plan_1..9.json (PRECOMPUTE)
 uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compute
-uv run python -m ff_agent.cli live --slot 6    # M9 — the live draft loop
+uv run python -m ff_agent.cli live --slot 6    # M9 — the live draft loop (terminal)
+uv run python -m ff_agent.cli gui --slot 6     # M9 — the SAME loop in a browser
 uv run python -m ff_agent.cli mock             # M9 GATE — replay 2025 live
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
