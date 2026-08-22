@@ -132,6 +132,24 @@ def tier_stability(
             "tier_stability: canonical_id has nulls, and the perturbation is "
             "keyed on it — a null key would silently share one draw."
         )
+    
+    # §0.2: refuse duplicated input. The count is incremented once per ROW per
+    # trial, so a player present twice reports ``2 x trials / trials = 2.0`` —
+    # impossible for a field documented as a frequency. And the returned frame
+    # inherits the duplicate, so joining it back fanned 15 → 60 rows in 2026.
+    dupes = df.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    if dupes.height:
+        cols = [c for c in ("canonical_id", "name", "position", "team", value)
+                if c in df.columns]
+        detail = (df.filter(pl.col("canonical_id").is_in(dupes["canonical_id"].implode()))
+                  .select(cols).sort("canonical_id"))
+        raise ValueError(
+            f"tier_stability needs one row per canonical_id; {dupes.height} "
+            f"id(s) appear more than once ({int(dupes['len'].sum())} rows). "
+            f"Deduplicating here would hide a join that fanned out upstream — "
+            f"find that join instead.\n{detail}"
+        )
+    
     ids = df["canonical_id"].to_list()
     noise = _noise_matrix(ids, trials, noise_pct, seed)
 

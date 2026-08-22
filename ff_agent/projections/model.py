@@ -143,13 +143,31 @@ def project(season: int, models: dict[str, PositionModel] | None = None) -> pl.D
                                     "model_points": pl.Float64, "season": pl.Int64})
     df = pl.concat(out).sort("model_points", descending=True)
 
-    # A player who changed NFL teams mid-season has TWO rows in the prior-season
-    # opportunity table, one per team, and both survive to here. Left as-is they
-    # fan out through blend()'s left join (1 -> 2) and again through the board's
-    # tier join (2 -> 4), so §0.2's "exactly one canonical ID" quietly fails —
-    # by the 2026 board, 15 players appeared four times each. Keep the row with
-    # the most projected production, which is the fuller stint; ordering above
-    # already puts it first.
+    # A player who changed NFL teams mid-season has one row PER TEAM in the
+    # prior-season opportunity table, and every one of them survives to here (25
+    # players for 2026). Left as-is they fan out through blend()'s left join
+    # (1 -> 2) and again through the board's tier join (2 -> 4), so §0.2's
+    # "exactly one canonical ID" quietly fails — by the 2026 board, 15 players
+    # appeared four times each.
+    #
+    # Keep the highest projection; the sort above already puts it first. This is
+    # NOT "the fuller stint", which is what an earlier version of this comment
+    # claimed: for 9 of the 25 it is the SHORTER one — Adam Thielen's 5 games in
+    # PIT beat his 9 in MIN — because the model reads per-game rates and a brief
+    # hot stretch projects high. So it is an upside read on a player whose
+    # season split in two, and worth naming as such.
+    #
+    # It is small where it counts. Only 15 of the 25 carry an ECR and reach the
+    # board at all, and at the model's 0.12 blend weight the choice is worth at
+    # most 5.3 blended points (Adonai Mitchell, ranked 173). Exactly one lands
+    # inside the 153-pick draftable range — Jakobi Meyers at 127 — and his two
+    # stints project within 0.09 of each other, so for the only player it could
+    # plausibly reach, it does not matter which row wins.
+    #
+    # The principled alternative is to aggregate the stints into one
+    # player-season BEFORE fitting, so a traded player contributes his whole
+    # year. That changes the model's inputs, so it needs M3's walk-forward gate
+    # re-run against it, and is a separate job from stopping the fan-out.
     return df.unique(subset=["canonical_id"], keep="first", maintain_order=True)
 
 

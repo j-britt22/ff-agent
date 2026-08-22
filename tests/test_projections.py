@@ -169,3 +169,40 @@ def test_fit_uses_no_data_from_the_target_season():
     assert train["season"].max() <= LAST_SEASON - 2
     # a transition labelled N carries N+1 outcomes, so nothing reaches LAST_SEASON
     assert (train["season"].max() + 1) < LAST_SEASON
+
+
+def test_a_traded_player_is_projected_once():
+    """§0.2 at the root of the fan-out that reached the 2026 board.
+
+    The prior-season opportunity table carries one row per (player, NFL team),
+    so anyone traded mid-season arrives here twice — 25 players for 2026. Both
+    rows used to survive, fanning out 1 -> 2 through ``blend`` and 2 -> 4
+    through the board's tier join. The opportunity table is deliberately left
+    alone: two stints ARE two rows of opportunity, and collapsing them there
+    would change what the model is fitted on.
+    """
+    prior = (O.features_with_actuals(SEASON - 1)
+             .filter(pl.col("position").is_in(M.POSITIONS))
+             .drop_nulls("canonical_id"))
+    traded = prior.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    assert traded.height > 0, "no traded players — this test would prove nothing"
+
+    p = M.project(SEASON)
+    assert p.height == p["canonical_id"].n_unique()
+    assert p.filter(pl.col("canonical_id").is_in(traded["canonical_id"].implode())).height \
+        == traded.height
+
+
+def test_blend_cannot_multiply_rows():
+    """Consensus is the left side of a left join, so it fixes the row count —
+    but only if the model side is unique on the key."""
+    cons = pl.DataFrame({
+        "canonical_id": ["a", "b"],
+        "consensus_points": [200.0, 100.0],
+    })
+    model = pl.DataFrame({
+        "canonical_id": ["a", "a", "b"],
+        "model_points": [180.0, 120.0, 90.0],
+    })
+    assert M.blend(cons, model).height == 3, "a duplicated model row fans out"
+    assert M.blend(cons, model.unique(subset=["canonical_id"])).height == 2
