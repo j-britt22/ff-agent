@@ -575,6 +575,69 @@ def cmd_draft(args) -> int:
     return 0
 
 
+def cmd_gui(args) -> int:
+    """M9 in a browser. Same engine as `cli live`, read at a glance instead of
+    scrolled — and with an optional read-only poll of ESPN's draft feed.
+
+    §6 keeps manual entry as the source of truth: the poll only ever APPENDS
+    picks it agrees with, and reports a conflict rather than overwriting.
+    """
+    import time
+    import webbrowser
+
+    from ff_agent.draft import build as DDB
+    from ff_agent.draft import pool as DPL
+    from ff_agent.live import advise as AD
+    from ff_agent.live import log as LG
+    from ff_agent.live import server as SV
+    from ff_agent.live.entry import Resolver
+    from ff_agent.live.state import new_state
+
+    season = args.season or SEASON
+    if not args.slot:
+        print("--slot is required. You learn it at T-60 (§5).")
+        return 2
+
+    t0 = time.perf_counter()
+    pool = DPL.load_pool(ARTIFACTS_DIR)
+    if pool is None:
+        print("no cached pool — building it (run `cli plans` before draft day)")
+        pool = DPL.build_pool(season)
+        DPL.save_pool(pool, ARTIFACTS_DIR)
+    managers = DDB.managers_for_slot(args.slot)
+    state = new_state(pool, args.slot, managers)
+    resolver = Resolver(pool)
+    ctx = AD.load_context(season, pool, managers, state.rounds)
+    log = LG.SessionLog(LG.session_path(season, args.slot))
+    log.write("session", season=season, slot=args.slot, managers=managers,
+              pool_size=pool.n, interface="gui")
+
+    session = SV.DraftSession(state, resolver, ctx, season, args.slot,
+                              args.qb_cap, log)
+    httpd = SV.serve(session, port=args.port)
+    setup = time.perf_counter() - t0
+    url = f"http://127.0.0.1:{args.port}/"
+
+    print(f"\nFIRST DOWN SYNDROME — live draft GUI, slot {args.slot} ({season})")
+    print(f"  {pool.n} players · {state.total_picks} picks · ready in {setup:.1f}s")
+    print(f"  logging to {log.path}")
+    print(f"\n  OPEN: {url}\n")
+    print("  Nothing here is ever submitted to ESPN (§0.1). Ctrl-C to stop.")
+    # serve_forever() blocks, and stdout is block-buffered whenever this is
+    # piped or redirected — without an explicit flush the URL never appears and
+    # the human is looking at a dead terminal while the draft starts.
+    sys.stdout.flush()
+    if not args.no_browser:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped — nothing was submitted to ESPN (§0.1)")
+    finally:
+        httpd.server_close()
+    return 0
+
+
 def cmd_live(args) -> int:
     """M9: the live draft loop. Manual entry, sub-second advice, never submits."""
     import time
@@ -767,6 +830,13 @@ def main(argv=None) -> int:
     p.add_argument("--season", type=int)
     p.add_argument("--qb-cap", type=int, dest="qb_cap", default=3)
     p.set_defaults(fn=cmd_live)
+    p = sub.add_parser("gui")
+    p.add_argument("--slot", type=int, required=False)
+    p.add_argument("--season", type=int)
+    p.add_argument("--qb-cap", type=int, dest="qb_cap", default=3)
+    p.add_argument("--port", type=int, default=8777)
+    p.add_argument("--no-browser", action="store_true")
+    p.set_defaults(fn=cmd_gui)
     p = sub.add_parser("mock")
     p.add_argument("--season", type=int)
     p.add_argument("--no-log", action="store_true")

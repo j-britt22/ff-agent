@@ -1,0 +1,314 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>First Down Syndrome — live draft</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+/* System fonts only: §0.3 requires this page work with the network off, and a
+   webfont would silently fall back mid-draft. */
+:root{
+  --ground:#0B0E0C; --panel:#131815; --panel2:#1A211C; --line:#28322B;
+  --ink:#E9EEEA; --dim:#8B978F; --faint:#5C665F;
+  --signal:#B8F03C; --signal-dim:#7fa32a; --warn:#FF6B4A; --cool:#74B6DC;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
+  font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased}
+h1,h2,h3{margin:0;font-weight:600;text-wrap:balance}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+/* ── top bar ─────────────────────────────────────────────────────────── */
+header{display:flex;align-items:center;gap:18px;padding:10px 16px;
+  background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;
+  flex-wrap:wrap}
+.brand{font-weight:700;letter-spacing:.02em;font-size:13px}
+.brand span{color:var(--signal)}
+.stat{font-family:var(--mono);font-size:12px;color:var(--dim);white-space:nowrap}
+.stat b{color:var(--ink);font-weight:600}
+.spacer{flex:1}
+.pollbtn{font:inherit;font-size:12px;padding:4px 10px;border-radius:4px;cursor:pointer;
+  background:var(--panel2);color:var(--dim);border:1px solid var(--line)}
+.pollbtn.on{background:rgba(184,240,60,.12);color:var(--signal);border-color:var(--signal-dim)}
+.never{font-size:11px;color:var(--faint);border:1px solid var(--line);
+  padding:3px 8px;border-radius:4px}
+
+/* ── layout ──────────────────────────────────────────────────────────── */
+main{display:grid;grid-template-columns:1fr 320px;gap:14px;padding:14px;
+  max-width:1400px;margin:0 auto;align-items:start}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.card>h3{padding:9px 13px;font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--dim);border-bottom:1px solid var(--line);background:var(--panel2)}
+.pad{padding:13px}
+
+/* ── the entry box ───────────────────────────────────────────────────── */
+.entry{display:flex;gap:8px;padding:12px 13px;border-bottom:1px solid var(--line)}
+.entry input{flex:1;background:var(--ground);border:1px solid var(--line);color:var(--ink);
+  font-family:var(--mono);font-size:16px;padding:11px 13px;border-radius:6px;outline:none}
+.entry input:focus{border-color:var(--signal-dim);box-shadow:0 0 0 3px rgba(184,240,60,.10)}
+.entry button{font:inherit;font-weight:600;padding:0 15px;border-radius:6px;cursor:pointer;
+  background:var(--panel2);color:var(--dim);border:1px solid var(--line)}
+.entry button:hover{color:var(--ink)}
+.msg{padding:8px 13px;font-family:var(--mono);font-size:12.5px;border-bottom:1px solid var(--line)}
+.msg.ok{color:var(--signal)} .msg.err{color:var(--warn)}
+.cands button{display:block;width:100%;text-align:left;font-family:var(--mono);font-size:13px;
+  background:none;border:none;border-top:1px solid var(--line);color:var(--cool);
+  padding:7px 13px;cursor:pointer}
+.cands button:hover{background:var(--panel2)}
+
+/* ── the recommendation ──────────────────────────────────────────────── */
+.turn{border-left:3px solid var(--signal)}
+.waiting{border-left:3px solid var(--line)}
+.headline{font-size:23px;font-weight:700;letter-spacing:-.01em;margin-bottom:3px}
+.headline em{font-style:normal;color:var(--signal)}
+.sub{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13px}
+th{text-align:left;font-weight:500;font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--faint);padding:5px 13px;border-bottom:1px solid var(--line)}
+td{padding:6px 13px;border-bottom:1px solid rgba(40,50,43,.5)}
+tr.clickable{cursor:pointer}
+tr.clickable:hover{background:var(--panel2)}
+tr.best td{background:rgba(184,240,60,.07)}
+tr.best .d{color:var(--signal);font-weight:600}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.pos{color:var(--dim);font-size:11px}
+.warnrow{color:var(--warn)}
+.bye{color:var(--signal-dim);font-size:10px}
+.note{padding:9px 13px;font-size:12px;color:var(--dim);border-top:1px solid var(--line)}
+.alarm{background:rgba(255,107,74,.10);color:var(--warn);padding:8px 13px;
+  font-family:var(--mono);font-size:12px;border-top:1px solid rgba(255,107,74,.25)}
+.chips{display:flex;gap:5px;flex-wrap:wrap;padding:9px 13px;border-bottom:1px solid var(--line)}
+.chip{font:inherit;font-size:11px;font-family:var(--mono);padding:3px 9px;border-radius:20px;
+  background:var(--panel2);color:var(--dim);border:1px solid var(--line);cursor:pointer}
+.chip.on{background:var(--signal);color:#0B0E0C;border-color:var(--signal);font-weight:600}
+.rosterline{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12.5px;
+  padding:4px 13px}
+.rosterline .p{color:var(--dim);width:34px;flex:none}
+.rosterline .t{color:var(--faint);font-size:11px}
+.mine{color:var(--signal)}
+.scroll{max-height:none;overflow:visible}
+.brd{max-height:460px;overflow-y:auto}
+</style>
+
+<header>
+  <div class="brand">FIRST DOWN <span>SYNDROME</span></div>
+  <div class="stat">slot <b id="h-slot">–</b></div>
+  <div class="stat">pick <b id="h-pick">–</b>/<span id="h-total">–</span></div>
+  <div class="stat">rd <b id="h-round">–</b></div>
+  <div class="stat" id="h-clock">–</div>
+  <div class="spacer"></div>
+  <div class="stat" id="h-poll">poll off</div>
+  <button class="pollbtn" id="pollbtn">connect to ESPN</button>
+  <button class="pollbtn" id="undobtn">undo</button>
+  <div class="never">never submits &mdash; §0.1</div>
+</header>
+
+<main>
+  <div>
+    <div class="card" id="mainCard">
+      <div class="entry">
+        <input id="q" placeholder="type the pick that just happened — name, or a team for D/ST" autocomplete="off" autofocus>
+        <button id="go">record</button>
+      </div>
+      <div id="msg"></div>
+      <div id="advice"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h3>best available</h3>
+      <div class="chips" id="chips"></div>
+      <div class="brd"><table id="board"></table></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h3>my roster</h3>
+      <div id="roster" class="pad" style="padding:8px 0"></div>
+      <div id="alarms"></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>recent picks</h3>
+      <div id="recent" style="padding:8px 0"></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h3>session</h3>
+      <div class="pad sub" id="session"></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let filter = null, latest = null, busy = false;
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => (
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function say(text, ok){
+  $('#msg').innerHTML = text ? `<div class="msg ${ok?'ok':'err'}">${esc(text)}</div>` : '';
+}
+
+async function post(url, body){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                             body: JSON.stringify(body||{})});
+  return r.json();
+}
+
+async function record(payload){
+  if (busy) return;
+  busy = true;
+  const r = await post('/api/pick', payload);
+  busy = false;
+  if (r.ok){ say(r.message, true); $('#q').value=''; }
+  else if (r.ambiguous){
+    say(r.message, false);
+    const div = document.createElement('div');
+    div.className = 'cands';
+    r.candidates.forEach(c => {
+      const b = document.createElement('button');
+      b.textContent = '→ ' + c.label;
+      b.onclick = () => record({index:c.index});
+      div.appendChild(b);
+    });
+    $('#msg').appendChild(div);
+  } else say(r.message, false);
+  $('#q').focus();
+  refresh();
+}
+
+$('#go').onclick = () => { const v=$('#q').value.trim(); if(v) record({query:v}); };
+$('#q').addEventListener('keydown', e => {
+  if (e.key === 'Enter'){ const v=e.target.value.trim(); if(v) record({query:v}); }
+});
+$('#undobtn').onclick = async () => {
+  const r = await post('/api/undo'); say(r.message, r.ok); $('#q').focus(); refresh();
+};
+$('#pollbtn').onclick = async () => {
+  const on = !(latest && latest.poll.enabled);
+  const r = await post('/api/poll', {enabled:on});
+  say(on ? 'polling ESPN — manual entry still wins (§6)' : 'polling off', true);
+  refresh();
+};
+
+function renderAdvice(s){
+  const card = $('#mainCard');
+  const el = $('#advice');
+  if (s.complete){
+    card.className='card waiting';
+    el.innerHTML = `<div class="pad"><div class="headline">Draft complete.</div>
+      <div class="sub">${esc(s.summary)}</div></div>`;
+    return;
+  }
+  if (!s.my_turn){
+    card.className='card waiting';
+    const n = s.picks_until_my_turn;
+    el.innerHTML = `<div class="pad">
+      <div class="headline" style="font-size:18px;color:var(--dim)">On the clock: <em style="color:var(--ink)">${esc(s.on_the_clock)}</em></div>
+      <div class="sub">${n===null?'no picks left':'your next pick in <b>'+n+'</b> '+(n===1?'pick':'picks')}</div></div>`;
+    return;
+  }
+  card.className='card turn';
+  const a = s.advice;
+  if (!a){
+    el.innerHTML = `<div class="pad"><div class="headline">Your pick.</div>
+      <div class="sub">${esc(s.advice_error||'thinking…')}</div></div>`;
+    return;
+  }
+  let h = `<div class="pad" style="padding-bottom:9px">
+      <div class="headline">${esc(a.headline).replace(/^TAKE ([^(]+)/, 'TAKE <em>$1</em>')}</div>
+      <div class="sub">${a.n_sims} sims · ${a.elapsed}s · scenario ${esc(a.scenario)}</div>
+    </div>`;
+  h += `<table><tr><th>Δ</th><th>player</th><th>pos</th><th class="num">vor</th><th>if you pass</th></tr>`;
+  a.options.forEach((o,i) => {
+    const back = o.never_passed_on ? '<span style="color:var(--warn)">never comes back</span>'
+      : (o.survival==null ? '—' : 'back ' + Math.round(o.survival*100) + '%');
+    h += `<tr class="clickable ${i===0?'best':''}" data-i="${o.index}">
+      <td class="d num">${i===0?'best':o.delta.toFixed(2)}</td>
+      <td>${esc(o.name)}${o.free_bye?' <span class="bye">*bye</span>':''}</td>
+      <td class="pos">${esc(o.position)} ${esc(o.team)}</td>
+      <td class="num">${o.vor.toFixed(1)}</td>
+      <td>${back}</td></tr>`;
+  });
+  h += `</table>`;
+  if (a.slipping_away && a.slipping_away.length){
+    h += `<div class="note"><b style="color:var(--dim)">gone if you wait:</b> ` +
+      a.slipping_away.map(c => esc(c.name)+' ('+esc(c.position)+')').join(' · ') + `</div>`;
+  }
+  (a.branches||[]).forEach(b => {
+    h += `<div class="note">IF ${esc(b.condition)} (${Math.round(b.p_condition*100)}%):
+      take <b>${esc(b.if_true_take)}</b> — otherwise ${esc(b.if_false_take)}</div>`;
+  });
+  if (a.scenario_note) h += `<div class="note">${esc(a.scenario_note)}</div>`;
+  if (a.degraded) h += `<div class="alarm">${esc(a.degraded)}</div>`;
+  el.innerHTML = h;
+  el.querySelectorAll('tr.clickable').forEach(tr => {
+    tr.onclick = () => record({index: parseInt(tr.dataset.i,10)});
+  });
+}
+
+function renderBoard(s){
+  const chips = ['ALL','QB','RB','WR','TE','DST','K'];
+  $('#chips').innerHTML = chips.map(c =>
+    `<button class="chip ${(filter===null&&c==='ALL')||filter===c?'on':''}" data-c="${c}">${c}</button>`
+  ).join('');
+  $('#chips').querySelectorAll('.chip').forEach(b => b.onclick = () => {
+    filter = b.dataset.c==='ALL' ? null : b.dataset.c; renderBoard(latest);
+  });
+  const rows = s.board.filter(r => !filter || r.position===filter).slice(0,40);
+  $('#board').innerHTML =
+    `<tr><th>player</th><th>pos</th><th class="num">vor</th><th class="num">bye</th></tr>` +
+    rows.map(r => `<tr class="clickable" data-i="${r.index}">
+      <td>${esc(r.name)}${r.free_bye?' <span class="bye">*</span>':''}</td>
+      <td class="pos">${esc(r.position)} ${esc(r.team)}</td>
+      <td class="num">${r.vor.toFixed(1)}</td>
+      <td class="num" style="color:var(--faint)">${r.bye??'—'}</td></tr>`).join('');
+  $('#board').querySelectorAll('tr.clickable').forEach(tr => {
+    tr.onclick = () => { $('#q').value = ''; record({index: parseInt(tr.dataset.i,10)}); };
+  });
+}
+
+function render(s){
+  latest = s;
+  $('#h-slot').textContent = s.slot;
+  $('#h-pick').textContent = s.pick;
+  $('#h-total').textContent = s.total_picks;
+  $('#h-round').textContent = s.round;
+  $('#h-clock').innerHTML = s.complete ? 'complete'
+    : `on the clock <b>${esc(s.on_the_clock)}</b>` + (s.my_turn?' <span style="color:var(--signal)">— YOU</span>':'');
+  $('#h-poll').textContent = s.poll.enabled ? s.poll.status : 'poll off';
+  $('#h-poll').style.color = s.poll.status==='CONFLICT' ? 'var(--warn)'
+    : (s.poll.enabled ? 'var(--signal)' : 'var(--dim)');
+  $('#pollbtn').className = 'pollbtn' + (s.poll.enabled?' on':'');
+  $('#pollbtn').textContent = s.poll.enabled ? 'ESPN: live' : 'connect to ESPN';
+
+  renderAdvice(s);
+  renderBoard(s);
+
+  const c = s.counts;
+  const shape = Object.keys(c).filter(k=>c[k]).map(k=>k+c[k]).join(' ') || 'empty';
+  $('#roster').innerHTML =
+    `<div class="rosterline"><span class="t">${s.roster.length}/17 · ${esc(shape)}</span></div>` +
+    (s.roster.map(r => `<div class="rosterline">
+        <span><span class="p">${esc(r.position)}</span>${esc(r.name)}</span>
+        <span class="t">${esc(r.team)}${r.bye?' bye'+r.bye:''}${r.free_bye?' <span class="bye">*</span>':''}</span>
+      </div>`).join('') || '<div class="rosterline"><span class="t">nothing yet</span></div>');
+  $('#alarms').innerHTML = (s.alarms||[]).map(a=>`<div class="alarm">!! ${esc(a)}</div>`).join('') +
+    (s.poll.conflict ? `<div class="alarm">${esc(s.poll.conflict)}</div>` : '');
+
+  $('#recent').innerHTML = s.recent.map(r => `<div class="rosterline">
+      <span><span class="p">${r.pick}</span><span class="${r.mine?'mine':''}">${esc(r.name)}</span></span>
+      <span class="t">${esc(r.manager)}</span></div>`).join('')
+    || '<div class="rosterline"><span class="t">no picks yet</span></div>';
+
+  $('#session').innerHTML = `season ${s.season} · ${s.board.length}+ available<br>log: ${esc(s.log_path)}`;
+}
+
+async function refresh(){
+  try { const r = await fetch('/api/state'); render(await r.json()); }
+  catch(e){ $('#h-poll').textContent = 'server unreachable'; }
+}
+refresh();
+setInterval(refresh, 2500);
+</script>
