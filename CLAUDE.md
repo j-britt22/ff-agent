@@ -163,6 +163,10 @@ picks wide (26% of the draft).** Runs at ~11s per slot at 10,000 sims.
 **M9 (§0.2 structural guards) — COMPLETE 2026-08-22.** 290 tests pass.
 Guard against fan-out at the tier_stability join and in tier_stability() itself.
 Merged with the tier_stability reproducibility refactor (03d217a).
+
+**M4 (LA/LAR bye and SOS) — FIXED 2026-08-22.** +7 regression tests for the
+Rams-trap fix: team vocabulary canonicalisation at the nflverse boundary and
+assertions on joined team fields.
 `uv run python -m ff_agent.cli plans` precomputes; `draft --slot N` is a **file
 read** (§5's T−60 budget is 5 seconds and it is asserted, not hoped for).
 
@@ -235,7 +239,7 @@ uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compu
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 290 pass
+uv run pytest                             # 290 + 7 = 297 pass (running after merge)
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -532,6 +536,43 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
 - Tier breaks are re-run under ±5% projection noise; `tier_stability` records how
   often each survives, so a cliff that exists at only one exact projection is
   visible as false precision.
+- **THE RAMS TRAP BIT A THIRD TIME, in the M4 board — fixed at the source
+  2026-08-22.** nflverse spells them `LA`; ESPN, the crosswalk and therefore the
+  board spell them `LAR`. `board_inputs.build` left-joined the bye table and the
+  playoff-SOS table on the raw abbreviation, so **all 18 Rams carried a null
+  `bye_week` AND a null `playoff_sos`** — Puka Nacua at overall rank 13,
+  Stafford 36, Kyren Williams 41. `playoff_schedule_strength` had its own
+  independent copy of the same bug, since it reads nflverse schedules directly.
+- **What made it survive is that it was ACCIDENTALLY CORRECT.** `build.py` does
+  `free_bye_week_5_or_14.fill_null(False)`, and LA's 2026 bye is week 11 — which
+  genuinely is not in {5, 14}. So the §2.1 flag was right by luck, VOR and every
+  `overall_rank` were **byte-identical before and after the fix**, and nothing
+  looked wrong. In any season where the Rams bye in week 5 or 14 the whole roster
+  silently loses the bonus. `playoff_sos` had no such luck: §2.4 calls weeks
+  15–17 schedule strength a real draft criterion and it was simply missing for a
+  top-15 player.
+- **Fixed once, at the nflverse boundary, not a fourth time downstream.**
+  `byes.team_weeks_played` now canonicalises through `crosswalk.normalize_team`,
+  so the whole module speaks one spelling; `bye_weeks` asserts the vocabulary
+  against `CURRENT_TEAMS` via `byes.assert_canonical_teams`, and
+  `board_inputs.assert_team_fields_resolved` refuses to return a board where any
+  non-free-agent has a null `bye_week` or `playoff_sos`. A left join fails as a
+  NULL, not an error — that is the whole reason this class of bug is silent, so
+  the assert is the fix and the normalisation is only the repair.
+- **It was never only the Rams.** Normalising also folds 2016 `SD` → `LAC` and
+  2016–19 `OAK` → `LV`, so a backtest board on those seasons was dropping two
+  more franchises the same way. Verified 2016–2026: exactly 32 canonical teams
+  every season, no collisions. `WSH → WAS` was already handled on the ESPN side
+  and is now asserted from both directions.
+- **`tier_stability` and tie-broken `overall_rank` are NOT reproducible run to
+  run** — found while diffing the fix, pre-existing and NOT caused by it. Two
+  runs of identical code differ on 77 `tier_stability` values and 4
+  `overall_rank`s. `model.project`'s `.sort()` is not stable, so equal
+  `model_points` land in a different row order; `tier_stability`'s `seed=17` then
+  hands its noise vector to different players, and `rank("ordinal")` breaks ties
+  differently. The VALUES are stable (0 players' `model_points` differ) — only
+  the ORDER is. Same class as M7's "an unordered unique makes the whole sim
+  irreproducible". Not fixed here; out of scope.
 
 **M3b findings:**
 - `ff_opportunity` lives in a **separate repo** (`nflverse/ffopportunity`), covers

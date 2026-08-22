@@ -3,7 +3,7 @@ import polars as pl
 import pytest
 
 from ff_agent.config import FREE_BYE_WEEKS, HISTORY_SEASONS, SEASON
-from ff_agent.data import byes, nflverse as nv
+from ff_agent.data import byes, crosswalk as cw, nflverse as nv
 
 
 @pytest.fixture(scope="module")
@@ -86,3 +86,49 @@ def test_no_unexplained_anomalies_in_the_history_window(sched):
         a = byes.schedule_anomalies(season, schedules=sched)
         found |= {(r["season"], r["team"], r["week"]) for r in a.to_dicts()}
     assert found == known, f"unexpected schedule anomalies: {found ^ known}"
+
+
+# ─── team spelling: nflverse "LA" vs everyone else's "LAR" ───────────────────
+def test_bye_table_speaks_one_canonical_team_vocabulary(sched):
+    """The bye table is joined against ESPN-derived rows, so it must not carry
+    nflverse's spelling.
+
+    nflverse spells the Rams ``LA``; ESPN, the crosswalk, the projections and the
+    board all spell them ``LAR``. A left join on the raw abbreviation does not
+    fail — it yields null — so this has bitten three separate times (M2 scoring,
+    M7 draft pool, M4 board). Pinning the vocabulary at the source is what stops
+    a fourth.
+    """
+    for season in [*HISTORY_SEASONS, SEASON]:
+        b = byes.bye_weeks(season, schedules=sched)
+        teams = set(b["team"].to_list())
+        assert teams <= set(cw.CURRENT_TEAMS), (
+            f"{season}: non-canonical team abbreviation(s) "
+            f"{sorted(teams - set(cw.CURRENT_TEAMS))}"
+        )
+        assert len(teams) == 32
+        assert "LAR" in teams and "LA" not in teams
+
+
+def test_relocated_franchises_fold_into_their_current_spelling(sched):
+    """2016 is the start of the history window and predates two relocations.
+
+    Left raw, a 2016 backtest board would drop San Diego and Oakland the same way
+    the 2026 board dropped the Rams. Folding them in is what keeps every season
+    joinable against one vocabulary.
+    """
+    b2016 = set(byes.bye_weeks(2016, schedules=sched)["team"].to_list())
+    assert {"SD", "OAK", "STL"} & b2016 == set()
+    assert {"LAC", "LV", "LAR"} <= b2016
+
+
+def test_a_non_canonical_team_is_a_blocking_error():
+    """§0.2's culture, applied to team entities: fail loudly, never silently.
+
+    The guard has to be shown to fire. A test that only reads today's clean data
+    passes just as happily when the assertion is deleted.
+    """
+    bad = pl.DataFrame({"season": [2026], "team": ["LA"],
+                        "bye_week": [11], "free_bye": [False]})
+    with pytest.raises(byes.ByeWeekError, match="not canonical"):
+        byes.assert_canonical_teams(bad, 2026)

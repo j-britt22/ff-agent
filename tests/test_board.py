@@ -8,6 +8,9 @@ from ff_agent.board import build as B
 from ff_agent.board import replacement as R
 from ff_agent.board import review as RV
 from ff_agent.board import tiers as T
+from ff_agent.data import byes as byes_mod
+from ff_agent.data import crosswalk as cw
+from ff_agent.projections import board_inputs as BI
 
 pytestmark = pytest.mark.espn
 
@@ -244,3 +247,79 @@ def test_divergences_all_carry_a_reason(board):
     assert d.height > 0
     assert d["reason"].null_count() == 0
     assert d.filter(pl.col("reason").str.len_chars() < 10).height == 0
+
+
+# ─── team joins: no player silently loses his bye or his playoff SOS ────────
+def test_no_rostered_player_is_missing_a_bye_week_or_playoff_sos(board):
+    """A left join on a team abbreviation fails as a NULL, not as an error.
+
+    §2.1's bye term and §2.4's weeks 15-17 schedule strength both hang off that
+    join, and `build.py` fills the free-bye flag with False — so a spelling
+    mismatch produces a board that looks complete and prices a whole NFL roster
+    wrong. That is exactly what happened: nflverse's `LA` never met the board's
+    `LAR`, and eighteen Rams carried null on both fields.
+    """
+    rostered = board.filter(
+        pl.col("team").is_not_null()
+        & ~pl.col("team").str.to_uppercase().is_in(list(cw.NON_TEAMS))
+    )
+    assert rostered.height > 400
+    for field in ("bye_week", "playoff_sos"):
+        bad = rostered.filter(pl.col(field).is_null())
+        assert bad.height == 0, (
+            f"{bad.height} rostered player(s) have a null {field}; teams "
+            f"affected: {sorted(set(bad['team'].to_list()))}"
+        )
+
+
+def test_board_team_vocabulary_is_a_subset_of_the_bye_table(board):
+    """The set difference is the diagnosis, so assert on it directly.
+
+    When this broke, `board - byes` was ['LAR'] and `byes - board` was ['LA'] —
+    one franchise, spelled two ways, and nothing else wrong anywhere.
+    """
+    bye_teams = set(byes_mod.bye_weeks(SEASON)["team"].to_list())
+    board_teams = {
+        t for t in board["team"].to_list()
+        if t is not None and t.upper() not in cw.NON_TEAMS
+    }
+    assert board_teams <= bye_teams, (
+        f"board teams absent from the bye table: {sorted(board_teams - bye_teams)}"
+    )
+    assert len(bye_teams) == 32
+
+
+def test_the_rams_keep_their_bye_and_their_playoff_sos(board):
+    """The named regression. Found three times before it was fixed at the source.
+
+    It was invisible in 2026 because LA's bye is week 11, which is genuinely not
+    in {5, 14} — so `fill_null(False)` happened to give the right §2.1 answer.
+    The next season the Rams bye in week 5 or 14, the whole roster would lose the
+    bonus and nothing would look wrong.
+    """
+    rams = board.filter(pl.col("team") == "LAR")
+    assert rams.height > 10, "no LAR players on the board at all"
+    assert rams["bye_week"].null_count() == 0
+    assert rams["playoff_sos"].null_count() == 0
+    assert rams["bye_week"].unique().to_list() == [
+        byes_mod.bye_weeks(SEASON).filter(pl.col("team") == "LAR")["bye_week"][0]
+    ]
+    assert board.filter(pl.col("team") == "LA").height == 0
+
+
+def test_a_dropped_team_join_is_a_blocking_error():
+    """The guard has to be shown to fire, or deleting it would not fail a test."""
+    planted = pl.DataFrame({
+        "name": ["Puka Nacua", "Some Free Agent"],
+        "position": ["WR", "RB"],
+        "team": ["LAR", None],
+        "bye_week": [None, None],
+        "playoff_sos": [23.8, None],
+    })
+    with pytest.raises(ValueError, match="null `bye_week`"):
+        BI.assert_team_fields_resolved(planted, SEASON)
+
+    # a free agent has no team and so cannot have a bye — exempt, not an error
+    BI.assert_team_fields_resolved(planted.head(0), SEASON)
+    fa_only = planted.tail(1)
+    BI.assert_team_fields_resolved(fa_only, SEASON)
