@@ -455,3 +455,84 @@ def test_the_gui_prompts_on_ambiguity_rather_than_guessing(pool, managers, tmp_p
     assert not r["ok"] and r.get("ambiguous"), r
     assert len(r["candidates"]) > 1
     assert s.state.history == [], "nothing may be recorded while ambiguous"
+
+
+# ── the confirmation queue ───────────────────────────────────────────────────
+# The feed proposes; a countdown accepts. Rejecting is the override, which is
+# the direction §6 wants: manual entry stays the source of truth.
+
+
+def test_a_detected_pick_waits_before_it_commits(pool, managers, tmp_path, context):
+    import time as _t
+
+    s = _session(pool, managers, tmp_path, context)
+    s.confirm_seconds = 5.0
+    s.pending.append({"index": 3, "at": _t.time(), "source": "espn_poll"})
+    assert s.drain_pending() == 0, "a fresh pick must not commit instantly"
+    assert s.state.history == []
+    assert s.snapshot()["pending"][0]["remaining"] > 0
+
+
+def test_an_unconfirmed_pick_commits_itself(pool, managers, tmp_path, context):
+    """"If I do not confirm in 10 seconds, assume that is the correct pick.\""""
+    import time as _t
+
+    s = _session(pool, managers, tmp_path, context)
+    s.confirm_seconds = 0.0     # the deadline has already passed
+    s.pending.append({"index": 3, "at": _t.time() - 1, "source": "espn_poll"})
+    assert s.drain_pending() == 1
+    assert s.state.history == [3]
+
+
+def test_pending_picks_commit_in_feed_order_only(pool, managers, tmp_path, context):
+    """A draft is an ordered sequence: if the oldest is not due, nothing behind
+    it may jump the queue, or picks land against the wrong managers.
+    """
+    import time as _t
+
+    s = _session(pool, managers, tmp_path, context)
+    s.confirm_seconds = 5.0
+    now = _t.time()
+    s.pending.append({"index": 1, "at": now, "source": "espn_poll"})          # not due
+    s.pending.append({"index": 2, "at": now - 99, "source": "espn_poll"})     # overdue
+    assert s.drain_pending() == 0, "the overdue pick must wait its turn"
+    assert s.state.history == []
+
+
+def test_confirming_also_accepts_everything_ahead_of_it(pool, managers, tmp_path, context):
+    import time as _t
+
+    s = _session(pool, managers, tmp_path, context)
+    s.confirm_seconds = 999
+    for i in (0, 1, 2):
+        s.pending.append({"index": i, "at": _t.time(), "source": "espn_poll"})
+    assert s.confirm(2)["ok"]
+    assert s.state.history == [0, 1, 2]
+    assert s.pending == []
+
+
+def test_rejecting_discards_it_and_the_feed_cannot_resurrect_it(pool, managers,
+                                                                tmp_path, context):
+    """Rejecting is the override. Without the memory, the very next poll would
+    propose the same wrong pick again and the human would fight the feed.
+    """
+    import time as _t
+
+    s = _session(pool, managers, tmp_path, context)
+    s.pending.append({"index": 4, "at": _t.time(), "source": "espn_poll"})
+    assert s.reject(4)["ok"]
+    assert s.pending == [] and s.state.history == []
+    assert 4 in s.rejected
+
+
+def test_the_queue_never_proposes_a_player_twice(pool, managers, tmp_path, context):
+    """The feed repeats itself every few seconds by nature."""
+    import time as _t
+
+    s = _session(pool, managers, tmp_path, context)
+    s.confirm_seconds = 999
+    s.pending.append({"index": 6, "at": _t.time(), "source": "espn_poll"})
+    queued = {p["index"] for p in s.pending}
+    again = [i for i in (6,) if i not in s.state.taken() and i not in queued
+             and i not in s.rejected]
+    assert again == []

@@ -32,6 +32,15 @@ from ff_agent.live.state import DraftState
 
 UI_PATH = Path(__file__).with_name("ui.html")
 
+CONFIRM_SECONDS = 10.0
+"""How long a detected pick waits for a human before it commits itself.
+
+§6 makes manual entry the source of truth, and a feed that is silently wrong
+corrupts the board in the way §0.2 warns about. But a draft does not pause for
+confirmation dialogs, so the compromise is a visible countdown: the pick is
+shown, the human can reject it, and if nobody objects it lands. Rejecting is the
+override, not confirming."""
+
 
 class DraftSession:
     """Everything one browser tab needs, behind a lock.
@@ -59,6 +68,10 @@ class DraftSession:
         self.poll_status = "off"
         self.poll_conflict = ""
         self._last_poll = 0.0
+        # picks the feed has proposed but nobody has accepted yet, oldest first
+        self.pending: list[dict] = []
+        self.rejected: set[int] = set()
+        self.confirm_seconds = CONFIRM_SECONDS
 
     # ── advice, memoised per pick so re-rendering is free ────────────────────
     def advice(self) -> AD.Advice | None:
@@ -127,6 +140,75 @@ class DraftSession:
                            player=self.resolver.describe(i))
             return {"ok": True, "message": f"undid: {self.resolver.describe(i)}"}
 
+    # ── the confirmation queue ───────────────────────────────────────────────
+    def drain_pending(self) -> int:
+        """Commit whatever nobody objected to in time.
+
+        Strictly FRONT-TO-BACK: a draft is an ordered sequence, so if the oldest
+        pending pick is not due yet, nothing behind it may jump the queue — that
+        would attribute picks to the wrong managers.
+        """
+        committed = 0
+        with self.lock:
+            now = time.time()
+            while self.pending:
+                head = self.pending[0]
+                if now - head["at"] < self.confirm_seconds:
+                    break
+                self.pending.pop(0)
+                if head["index"] in self.state.taken():
+                    continue
+                r = self.record_index(head["index"], source=head["source"] + "_auto")
+                if not r["ok"]:
+                    break
+                committed += 1
+        return committed
+
+    def confirm(self, index: int | None = None) -> dict:
+        """Accept now instead of waiting out the countdown."""
+        with self.lock:
+            if not self.pending:
+                return {"ok": False, "message": "nothing waiting"}
+            if index is None:
+                index = self.pending[0]["index"]
+            hit = next((p for p in self.pending if p["index"] == index), None)
+            if hit is None:
+                return {"ok": False, "message": "that pick is no longer pending"}
+            # Confirming out of order would reorder the draft, so accept
+            # everything ahead of it too — they were detected earlier.
+            out = {"ok": True, "message": ""}
+            while self.pending:
+                head = self.pending.pop(0)
+                if head["index"] not in self.state.taken():
+                    out = self.record_index(head["index"], source=head["source"])
+                    if not out["ok"]:
+                        return out
+                if head["index"] == index:
+                    break
+            return out
+
+    def reject(self, index: int | None = None) -> dict:
+        """Throw a detected pick out. This is the override §6 exists for.
+
+        Rejected indices are remembered so the next poll does not immediately
+        propose the same wrong pick again.
+        """
+        with self.lock:
+            if not self.pending:
+                return {"ok": False, "message": "nothing waiting"}
+            if index is None:
+                index = self.pending[-1]["index"]
+            hit = next((p for p in self.pending if p["index"] == index), None)
+            if hit is None:
+                return {"ok": False, "message": "that pick is no longer pending"}
+            self.pending = [p for p in self.pending if p["index"] != index]
+            self.rejected.add(index)
+            self.log.write("rejected_feed_pick",
+                           player=self.resolver.describe(index))
+            return {"ok": True,
+                    "message": f"rejected {self.resolver.describe(index)} — "
+                               f"type the correct pick"}
+
     # ── the ESPN feed (§6: convenience, never truth) ──────────────────────────
     def do_poll(self, force: bool = False) -> None:
         if not self.poll_enabled and not force:
@@ -156,22 +238,23 @@ class DraftSession:
                 self.poll_status = "CONFLICT"
                 return
             self.poll_conflict = ""
-            added = 0
+            # PROPOSE, do not apply. Anything already pending, already taken or
+            # explicitly rejected is skipped, so a repeating feed cannot queue
+            # the same pick twice or resurrect one the human threw out.
+            queued = {p["index"] for p in self.pending}
+            proposed = 0
             for i in feed[len(mine):]:
-                if i in self.state.taken():
+                if i in self.state.taken() or i in queued or i in self.rejected:
                     continue
-                who = self.state.managers[int(self.state.order[len(self.state.history)])]
-                try:
-                    self.state.record(i)
-                except (ValueError, IndexError):
-                    break
-                self.log.pick(self.state, i, who, "espn_poll")
-                added += 1
-            if added:
-                self._invalidate()
+                self.pending.append({
+                    "index": i, "at": time.time(), "source": "espn_poll",
+                })
+                queued.add(i)
+                proposed += 1
             extra = f" · {len(r.unresolved)} unplaceable" if r.unresolved else ""
             self.poll_status = (f"live · {r.n_feed_picks} picks on ESPN"
-                                f"{' · +' + str(added) if added else ''}{extra}")
+                                f"{' · +' + str(proposed) + ' pending' if proposed else ''}"
+                                f"{extra}")
 
     # ── what the browser renders ─────────────────────────────────────────────
     def snapshot(self) -> dict:
@@ -234,6 +317,19 @@ class DraftSession:
                 "recent": list(reversed(recent)),
                 "poll": {"enabled": self.poll_enabled, "status": self.poll_status,
                          "conflict": self.poll_conflict},
+                "confirm_seconds": self.confirm_seconds,
+                "pending": [
+                    {
+                        "index": q["index"],
+                        "label": self.resolver.describe(q["index"]),
+                        "for_manager": st.managers[int(st.order[
+                            min(len(st.history) + k, st.total_picks - 1)])],
+                        "pick": len(st.history) + k + 1,
+                        "remaining": round(
+                            max(0.0, self.confirm_seconds - (time.time() - q["at"])), 1),
+                    }
+                    for k, q in enumerate(self.pending)
+                ],
                 "advice_error": self._advice_error,
                 "log_path": str(self.log.path),
             }
@@ -283,6 +379,7 @@ def make_handler(session: DraftSession):
                 return self._send(200, UI_PATH.read_bytes(), "text/html; charset=utf-8")
             if self.path.startswith("/api/state"):
                 session.do_poll()
+                session.drain_pending()
                 return self._json(session.snapshot())
             self._json({"error": "not found"}, 404)
 
@@ -301,6 +398,10 @@ def make_handler(session: DraftSession):
                 return self._json(r)
             if self.path == "/api/undo":
                 return self._json(session.undo())
+            if self.path == "/api/confirm":
+                return self._json(session.confirm(body.get("index")))
+            if self.path == "/api/reject":
+                return self._json(session.reject(body.get("index")))
             if self.path == "/api/poll":
                 session.poll_enabled = bool(body.get("enabled", True))
                 session.poll_status = "starting…" if session.poll_enabled else "off"
@@ -315,4 +416,26 @@ def make_handler(session: DraftSession):
 
 def serve(session: DraftSession, port: int = 8777) -> ThreadingHTTPServer:
     httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(session))
+    _start_ticker(session)
     return httpd
+
+
+def _start_ticker(session: DraftSession, every: float = 1.0) -> threading.Thread:
+    """Poll and drain on a timer, independently of the browser.
+
+    The page also drains when it refreshes, but a backgrounded tab gets its
+    timers throttled by the browser — so a countdown the human is watching
+    would silently stall. The clock has to belong to the server.
+    """
+    def run():
+        while True:
+            time.sleep(every)
+            try:
+                session.do_poll()
+                session.drain_pending()
+            except Exception:                 # a tick must never kill the loop
+                pass
+
+    t = threading.Thread(target=run, daemon=True, name="ff-draft-ticker")
+    t.start()
+    return t
