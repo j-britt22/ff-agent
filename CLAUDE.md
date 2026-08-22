@@ -239,7 +239,7 @@ uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compu
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 290 + 7 = 297 pass (running after merge)
+uv run pytest                             # 297 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
