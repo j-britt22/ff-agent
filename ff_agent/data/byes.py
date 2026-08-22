@@ -18,21 +18,68 @@ import polars as pl
 
 from ff_agent.config import FREE_BYE_WEEKS, REGULAR_SEASON_WEEKS
 from ff_agent.data import nflverse as nv
+from ff_agent.data.crosswalk import CURRENT_TEAMS, normalize_team
 
 
 class ByeWeekError(RuntimeError):
     """Bye derivation produced something structurally impossible."""
 
 
+def assert_canonical_teams(df: pl.DataFrame, season: int, column: str = "team") -> None:
+    """§0.2 applied to team entities — one spelling, asserted, never inferred.
+
+    §0.2 says every player must resolve to exactly one canonical id and that a
+    miss is a blocking error, not a warning. A team abbreviation is the D/ST
+    corollary of the same rule, and it is the join key that §2.1's bye term and
+    §2.4's playoff-SOS term both hang off. So it gets the same treatment.
+    """
+    unknown = sorted(set(df[column].to_list()) - set(CURRENT_TEAMS))
+    if unknown:
+        raise ByeWeekError(
+            f"Season {season}: team abbreviation(s) {unknown} in column "
+            f"'{column}' are not canonical (see crosswalk.CURRENT_TEAMS). Any "
+            f"join against ESPN-derived rows drops them SILENTLY, as a null. "
+            f"Add the alias to crosswalk.ESPN_TEAM_ALIASES; do not special-case "
+            f"it here."
+        )
+
+
 def team_weeks_played(season: int, schedules: pl.DataFrame | None = None) -> pl.DataFrame:
-    """One row per (team, week) the team actually plays in the regular season."""
+    """One row per (team, week) the team actually plays in the regular season.
+
+    Abbreviations are canonicalised here, and this is the only place in the
+    module where a team name enters from nflverse — every other function derives
+    from this one, so normalising at this single boundary is what makes the
+    module speak one spelling.
+
+    **Why it has to happen at all.** nflverse spells the Rams ``LA``; ESPN, the
+    crosswalk, and therefore every projection and board row spell them ``LAR``.
+    Left raw the mismatch is invisible: a left join yields null, the board fills
+    the §2.1 flag with ``False``, and eighteen Rams — Puka Nacua at overall rank
+    13 among them — carry no bye week and no playoff SOS. It is only
+    *accidentally* harmless in a season like 2026 where LA's bye (week 11) misses
+    weeks 5 and 14 anyway. Caught three separate times downstream (M2 scoring,
+    M7 draft pool, M4 board) before being fixed at the source.
+
+    Historical relocations fold in on the same path — 2016 ``SD`` becomes
+    ``LAC``, 2016-19 ``OAK`` becomes ``LV`` — which keeps backtest seasons
+    joinable against the same vocabulary. Verified 2016-2026: exactly 32 distinct
+    teams every season, no collisions.
+    """
     sched = nv.schedules() if schedules is None else schedules
     reg = sched.filter(
         (pl.col("season") == season) & (pl.col("game_type") == "REG")
     ).select("week", "home_team", "away_team")
     home = reg.select(pl.col("home_team").alias("team"), "week")
     away = reg.select(pl.col("away_team").alias("team"), "week")
-    return pl.concat([home, away]).unique().sort(["team", "week"])
+    return (
+        pl.concat([home, away])
+        .with_columns(
+            pl.col("team").map_elements(normalize_team, return_dtype=pl.Utf8)
+        )
+        .unique()
+        .sort(["team", "week"])
+    )
 
 
 BYE_WINDOW = frozenset(range(4, 15))
@@ -141,6 +188,7 @@ def bye_weeks(season: int, schedules: pl.DataFrame | None = None) -> pl.DataFram
         raise ByeWeekError(
             f"Season {season}: derived byes for {byes_df.height} teams, expected 32."
         )
+    assert_canonical_teams(byes_df, season)
     return byes_df
 
 

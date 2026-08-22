@@ -13,6 +13,7 @@ import polars as pl
 
 from ff_agent.config import FREE_BYE_WEEKS, SEASON
 from ff_agent.data import byes as byes_mod
+from ff_agent.data import crosswalk as cw
 from ff_agent.data import nflverse as nv
 from ff_agent.projections import actuals as A
 from ff_agent.projections import calibration as CAL
@@ -35,12 +36,22 @@ def playoff_schedule_strength(season: int) -> pl.DataFrame:
         (pl.col("season") == season) & (pl.col("game_type") == "REG")
         & pl.col("week").is_in(list(PLAYOFF_WEEKS))
     )
+    # This function reads nflverse schedules directly, so it has its own copy of
+    # the LA/LAR problem that byes.py fixes at its boundary — and the same silent
+    # failure mode: `playoff_sos` comes back null for every Rams player and §2.4's
+    # "weeks 15-17 schedule strength is a real draft criterion" quietly does not
+    # apply to them. Normalise `team` (the key the board joins on) and `opp`
+    # (the key the two frames below join on) in the same step, or one side moves
+    # without the other.
+    def canon(c: str) -> pl.Expr:
+        return pl.col(c).map_elements(cw.normalize_team, return_dtype=pl.Utf8)
+
     pairs = pl.concat([
         sched.select("week", pl.col("home_team").alias("team"),
                      pl.col("away_team").alias("opp")),
         sched.select("week", pl.col("away_team").alias("team"),
                      pl.col("home_team").alias("opp")),
-    ])
+    ]).with_columns(canon("team"), canon("opp"))
     prior = nv.schedules(offline=True).filter(
         (pl.col("season") == season - 1) & (pl.col("game_type") == "REG")
     )
@@ -49,7 +60,9 @@ def playoff_schedule_strength(season: int) -> pl.DataFrame:
                      pl.col("away_score").alias("pa")),
         prior.select(pl.col("away_team").alias("opp"),
                      pl.col("home_score").alias("pa")),
-    ]).group_by("opp").agg(pl.col("pa").mean().alias("opp_pts_allowed_pg"))
+    ]).with_columns(canon("opp")).group_by("opp").agg(
+        pl.col("pa").mean().alias("opp_pts_allowed_pg")
+    )
 
     return (
         pairs.join(allowed, on="opp", how="left")
@@ -60,6 +73,44 @@ def playoff_schedule_strength(season: int) -> pl.DataFrame:
         )
         .sort("playoff_sos", descending=True)
     )
+
+
+def assert_team_fields_resolved(df: pl.DataFrame, season: int) -> None:
+    """Every player on a real NFL team must have a bye week and a playoff SOS.
+
+    Both are LEFT joins on a team abbreviation, and a left join's failure mode is
+    a null rather than an error. §0.2's culture — "fail loudly on any miss" —
+    applies to team joins as much as to player ids, because the symptom is
+    identical: the board keeps working and quietly prices a player wrong.
+
+    That is precisely how the LA/LAR mismatch survived. ``board/build.py`` does
+    ``free_bye_week_5_or_14.fill_null(False)``, so eighteen Rams read as "no free
+    bye" — which was *accidentally correct* for 2026, where LA byes in week 11.
+    In any season where the Rams bye in week 5 or 14 the whole roster would
+    silently lose the §2.1 bonus, and nothing would look wrong. ``playoff_sos``
+    had no such luck: it was simply missing for a top-15 player.
+
+    A free agent is exempt — there is no team to have a bye. "Free agent" is
+    spelled by ``crosswalk.NON_TEAMS`` rather than assumed to be null, because
+    ESPN sends the literal strings "None" and "FA" and which one survives depends
+    on how far upstream the row was normalised. Nothing else is exempt.
+    """
+    rostered = df.filter(
+        pl.col("team").is_not_null()
+        & ~pl.col("team").str.to_uppercase().is_in(list(cw.NON_TEAMS))
+    )
+    for field in ("bye_week", "playoff_sos"):
+        bad = rostered.filter(pl.col(field).is_null())
+        if bad.height:
+            teams = sorted(set(bad["team"].to_list()))
+            raise ValueError(
+                f"{bad.height} player(s) on a real NFL team have a null "
+                f"`{field}` for season {season} — a team abbreviation did not "
+                f"join. Teams affected: {teams}.\n"
+                f"Do NOT fill the null; find the spelling mismatch (see "
+                f"crosswalk.ESPN_TEAM_ALIASES and byes.assert_canonical_teams).\n"
+                f"{bad.select('name', 'position', 'team').head(10)}"
+            )
 
 
 def build(season: int = SEASON, weight: float = DEFAULT_WEIGHT) -> pl.DataFrame:
@@ -94,6 +145,7 @@ def build(season: int = SEASON, weight: float = DEFAULT_WEIGHT) -> pl.DataFrame:
         )
         .sort("blended_points", descending=True, nulls_last=True)
     )
+    assert_team_fields_resolved(out, season)
     return out.select(
         "season", "canonical_id", "name", "position", "team",
         "ecr", "pos_rank", "consensus_points", "model_points", "blended_points",
