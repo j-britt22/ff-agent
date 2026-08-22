@@ -76,10 +76,19 @@ ESPN_TEAM_ALIASES: dict[str, str] = {
 }
 
 
+NON_TEAMS = frozenset({"", "NONE", "NULL", "NA", "FA", "-"})
+"""ESPN sends the literal string "None" for a free agent. Passed through, it
+becomes the abbreviation "NONE", which joins to nothing and produces a confusing
+downstream error about a missing bye week rather than "this player has no team".
+"""
+
+
 def normalize_team(abbr: str | None) -> str | None:
     if not abbr:
         return None
     a = abbr.strip().upper()
+    if a in NON_TEAMS:
+        return None
     return ESPN_TEAM_ALIASES.get(a, a)
 
 

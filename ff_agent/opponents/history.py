@@ -94,7 +94,7 @@ def draft_history(seasons: tuple[int, ...] = HISTORY_SEASONS, **kw) -> pl.DataFr
     canon = cw.canonical_players().select(
         pl.col("espn_id"), pl.col("position").alias("_pos")
     )
-    return (
+    out = (
         df.join(canon, on="espn_id", how="left")
         .with_columns(
             pl.when(pl.col("espn_id").str.starts_with("-"))
@@ -109,6 +109,41 @@ def draft_history(seasons: tuple[int, ...] = HISTORY_SEASONS, **kw) -> pl.DataFr
         .filter(pl.col("manager").is_not_null())
         .sort(["season", "overall_pick"])
     )
+    _warn_non_fantasy_positions(out)
+    return out
+
+
+FANTASY_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DST")
+
+
+def _warn_non_fantasy_positions(df: pl.DataFrame) -> pl.DataFrame:
+    """Surface picks whose position is nflverse's, not ESPN's fantasy one.
+
+    The position here comes from a raw join to ``canonical_players``, so it is
+    the nflverse label. Travis Hunter is a CB in nflverse and a WR in ESPN — the
+    ID match is correct (M1 confirmed that) but the POSITION is not, and every
+    positional aggregate silently drops him: he still counts toward the phase
+    total in ``draft/calibrate.target_rates`` while contributing to no position,
+    so the fitted offsets are diluted.
+
+    One pick in 424 today. Reported rather than corrected, because guessing a
+    fantasy position from an nflverse one is exactly the fuzzy matching §0.2
+    forbids — the fix is an explicit override row when it matters.
+    """
+    odd = df.filter(
+        pl.col("position").is_null() | ~pl.col("position").is_in(list(FANTASY_POSITIONS))
+    )
+    if odd.height:
+        import warnings
+
+        names = odd.select("season", "name", "position").to_dicts()
+        warnings.warn(
+            f"{odd.height}/{df.height} draft picks carry a non-fantasy position "
+            f"(nflverse label, not ESPN's). They are dropped from every "
+            f"positional aggregate: {names}",
+            stacklevel=3,
+        )
+    return odd
 
 
 def manager_coverage(hist: pl.DataFrame | None = None) -> pl.DataFrame:

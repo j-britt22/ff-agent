@@ -141,7 +141,16 @@ def project(season: int, models: dict[str, PositionModel] | None = None) -> pl.D
         return pl.DataFrame(schema={"canonical_id": pl.Utf8, "name": pl.Utf8,
                                     "position": pl.Utf8, "team": pl.Utf8,
                                     "model_points": pl.Float64, "season": pl.Int64})
-    return pl.concat(out).sort("model_points", descending=True)
+    df = pl.concat(out).sort("model_points", descending=True)
+
+    # A player who changed NFL teams mid-season has TWO rows in the prior-season
+    # opportunity table, one per team, and both survive to here. Left as-is they
+    # fan out through blend()'s left join (1 -> 2) and again through the board's
+    # tier join (2 -> 4), so §0.2's "exactly one canonical ID" quietly fails —
+    # by the 2026 board, 15 players appeared four times each. Keep the row with
+    # the most projected production, which is the fuller stint; ordering above
+    # already puts it first.
+    return df.unique(subset=["canonical_id"], keep="first", maintain_order=True)
 
 
 def blend(

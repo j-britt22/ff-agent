@@ -9,6 +9,8 @@
     uv run python -m ff_agent.cli project --backtest   # M3 GATE — beats consensus?
     uv run python -m ff_agent.cli draftsim    # M7 — draft_sim.json (all 9 slots)
     uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
+    uv run python -m ff_agent.cli plans       # M8 — plan_1..9.json (precompute!)
+    uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: load, no compute
     uv run python -m ff_agent.cli settings    # refresh league settings JSON
     uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
     uv run python -m ff_agent.cli offline     # prove the offline path works
@@ -497,6 +499,80 @@ def cmd_draftsim(args) -> int:
     return 1 if alarms else 0
 
 
+def cmd_plans(args) -> int:
+    """M8: precompute all nine slot plans -> plan_1..9.json."""
+    from ff_agent.draft import plan_build as PB
+
+    paths = PB.write(
+        season=args.season or SEASON, n_sims=args.sims, qb_cap=args.qb_cap
+    )
+    print(f"wrote {len(paths)} files:")
+    for p in paths:
+        print(f"  {p}")
+
+    import json
+    idx = json.loads(__import__("pathlib").Path(paths[-1]).read_text())
+
+    print("\n§2.1 QB COUNT — M4 said TWO, M7 said THREE. Resolved on P(title):")
+    q = idx["qb_count_decision"]
+    with WIDE:
+        print(pl.DataFrame(q["by_cap"]))
+    print(f"  DECISION: {q['decision']} quarterbacks "
+          f"(runner-up {q['runner_up']}, margin {q['margin_over_runner_up']:+.4f})")
+    print(f"  ranking at the INFLATED delta: {q['ranking_at_inflated_delta']}")
+    print(f"  ranking at the HONEST delta:   {q['ranking_at_honest_delta']}")
+    print(f"  the noise correction changes the answer: "
+          f"{q['correction_changes_the_answer']}")
+    print(f"  my honest delta {q['my_honest_delta']} against a variance "
+          f"crossover at {q['variance_crossover_delta']} "
+          f"(above it, variance costs seeding)")
+
+    print("\nQB SCENARIOS — the axis the draft turns on:")
+    with WIDE:
+        print(pl.DataFrame(idx["qb_scenarios"]["pressure"]))
+
+    print("\n§11 STEP 8 — do the nine plans actually differ?")
+    g = idx["plans_differ"]
+    print(f"  {g['verdict']}")
+    if g.get("extremes"):
+        print(f"  slot1-vs-slot5 {g['extremes']['slot1_vs_slot5']}   "
+              f"slot1-vs-slot9 {g['extremes']['slot1_vs_slot9']}   "
+              f"slot5-vs-slot9 {g['extremes']['slot5_vs_slot9']}")
+
+    print("\nPER SLOT")
+    rows = [{"slot": int(k), **{kk: vv for kk, vv in v.items()
+                                if kk != "roster_strength"},
+             **{f"strength_{a}": b for a, b in v["roster_strength"].items()}}
+            for k, v in idx["slots"].items()]
+    with WIDE:
+        print(pl.DataFrame(rows).sort("slot"))
+    return 0
+
+
+def cmd_draft(args) -> int:
+    """§5's T-60 drill: load one precomputed plan and print the sheet.
+
+    Deliberately does NO computation. If the plan is missing this fails with an
+    instruction rather than quietly building one while you are on the clock.
+    """
+    import random
+    import time
+
+    from ff_agent.draft import plan_build as PB
+    from ff_agent.draft import sheet as SH
+
+    t0 = time.perf_counter()
+    slot = args.slot or random.randint(1, 9)
+    if args.slot is None:
+        print(f"REHEARSAL — random slot {slot} (§5 asks for two of these)\n")
+    plan = PB.load(slot)
+    print(SH.render(plan, max_turns=args.turns))
+    elapsed = time.perf_counter() - t0
+    print(f"\nloaded in {elapsed:.2f}s"
+          + ("" if elapsed < 5 else "   ⚠ §5 BUDGET IS 5 SECONDS"))
+    return 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -579,6 +655,14 @@ def main(argv=None) -> int:
     p.add_argument("--season", type=int); p.add_argument("--sims", type=int, default=10000)
     p.add_argument("--validate", action="store_true")
     p.set_defaults(fn=cmd_draftsim)
+    p = sub.add_parser("plans")
+    p.add_argument("--season", type=int); p.add_argument("--sims", type=int, default=10000)
+    p.add_argument("--qb-cap", type=int, dest="qb_cap", default=None)
+    p.set_defaults(fn=cmd_plans)
+    p = sub.add_parser("draft")
+    p.add_argument("--slot", type=int, default=None)
+    p.add_argument("--turns", type=int, default=None)
+    p.set_defaults(fn=cmd_draft)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)

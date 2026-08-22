@@ -158,7 +158,56 @@ opponent model fit on **2023–24 only**, pool of 290 against 136 actual picks).
 **Graded arm CALIBRATED — 78% coverage against an 80% target, on intervals 35
 picks wide (26% of the draft).** Runs at ~11s per slot at 10,000 sims.
 
-**Next: M8 (nine slot plans → `plan_1..9.json`), then M9 (live draft loop).**
+**M8 (nine slot plans → `plan_1..9.json`) — COMPLETE 2026-08-21.** 274 tests pass.
+`uv run python -m ff_agent.cli plans` precomputes; `draft --slot N` is a **file
+read** (§5's T−60 budget is 5 seconds and it is asserted, not hoped for).
+
+**Next: M9 (live draft loop), then M10 (in-season jobs incl. `/week14`).**
+
+**M9 design constraint, stated by the human 2026-08-21:** the live draft agent
+must hand over **a concrete shortlist of players to choose from**, not a score or
+a strategy note. M8's `per_turn[].shortlist.candidates` is built to be exactly
+that — names, positions, and P(I take him here) — so M9 reads it rather than
+recomputing.
+
+**A `data-validator` pass on M7 (§0.4) found four real defects. All fixed:**
+- **§0.2 WAS BEING VIOLATED, silently.** `model.project` emitted **one row per
+  (player, prior NFL team)** for anyone who changed teams mid-season. Those fan
+  out through `blend()`'s left join (1→2) and again through the board's tier join
+  (2→4): **15 players reached the 2026 board four times each**, 60 of 600 pool
+  rows. The engine marks pool INDICES taken, not people, so two fantasy teams
+  could draft the same person in one simulated draft. Worst-affected was ranked
+  127 (Jakobi Meyers), so nothing in the draftable top 100 — but the mechanism is
+  generic to any player who changes teams. Deduplicated at the root, and §0.2 is
+  now **asserted at both boundaries** (`board.assert_one_row_per_player`,
+  `pool._to_pool`). Resolution was never the whole of §0.2; a join that fans out
+  breaks it just as thoroughly.
+- **`weekly_scale` divided by 16, inflating every player by 6.25%.** The reasoning
+  ("a bye costs a game") was wrong: **the NFL plays 18 WEEKS and 17 GAMES** — the
+  bye is the eighteenth week, not one of the seventeen. Verified on 2024 actuals,
+  where 215 players logged `games == 17`. Double-charging was already prevented at
+  the week level in `_week_points` and never depended on the divisor. It also
+  disagreed silently with `board/build.py`, `season/strength.py` and
+  `projections/consensus.py`, which all use 17. **A test had pinned the wrong
+  answer**, which is why it survived. Roster means moved ~145 → ~137.8.
+- **`draft_history` could never be cached as immutable.** It spans 2023–25 in one
+  table so it is cached with `season=None`, and `effective_ttl`'s "a completed
+  season never expires" rule can only fire when a season is given. With no
+  `TTL_POLICY` entry it fell back to the 1-day default and went stale daily —
+  harmless online, **fatal to the §0.3 offline draft-day path**, since the board,
+  the calibration and the opponent model all read it. Now 90 days.
+- **Travis Hunter carries nflverse's `CB`, not ESPN's `WR`.** The ID match is
+  right (M1 confirmed it) but the POSITION is nflverse's, and he is silently
+  dropped from every positional aggregate while still counting toward the phase
+  total in `target_rates` — so the fitted offsets are diluted. 1 pick in 424.
+  Now **warned loudly** rather than corrected: guessing a fantasy position from an
+  nflverse one is the fuzzy matching §0.2 forbids. The fix, when it matters, is an
+  explicit override row.
+
+**Knock-on:** the dedupe changed M3's plateau. The blend got slightly BETTER
+(mean Spearman 0.767 → **0.770**) and the range of weights winning all five
+seasons narrowed from 0.05–0.20 to **0.05–0.15** (0.20 now wins 4/5). The shipped
+weight of **0.12** sits inside either version. Recorded in `tests/test_projection_gate.py::PLATEAU`.
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
 must hand over **a concrete shortlist of players to choose from**, not a score or
@@ -177,10 +226,12 @@ uv run python -m ff_agent.cli opponents --validate  # M5 — opponents.json + ga
 uv run python -m ff_agent.cli simulate --validate   # M6 — season_sim.json
 uv run python -m ff_agent.cli draftsim            # M7 — draft_sim.json, 9 slots
 uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
+uv run python -m ff_agent.cli plans       # M8 — plan_1..9.json (PRECOMPUTE)
+uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compute
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 256 pass
+uv run pytest                             # 274 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -251,6 +302,50 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+
+**M8 findings:**
+- **§2.1's QB COUNT IS THREE, and M4's TWO was wrong for a locatable reason.**
+  M4 compared QB3's *expected* bye coverage (17.9 pts) against the best stash's
+  *ceiling minus mean* (26.4) — an expected value against a variance measure,
+  which counts upside as free. Scored on P(title), which §8 says is the actual
+  objective: **cap 3 → 0.2253, cap 4 → 0.2168, cap 2 → 0.2001**, margin
+  **+0.0085** over the runner-up. The ordering is identical at the inflated and
+  the noise-corrected delta, so it does not rest on the correction. And it holds
+  in the regime that *favours* M4's argument: my honest delta is **+6.9** against
+  a variance crossover at **+16.6**, so variance is still paying here — three
+  quarterbacks win anyway.
+- **§11 step 8 PASSES, measured the only way that means anything.** Between-slot
+  divergence **0.0571** against re-seed noise **0.0063** = **9.0x**. Nine Monte
+  Carlo plans always differ a little, so the comparison has to be against
+  re-running one slot on a different seed, not against zero. The first version of
+  this gate passed with a ratio of **infinity** because `run_slot` derives its
+  default seed from the slot number and the "re-seed" run reproduced the draft
+  exactly. Now pinned by `test_reseed_actually_changes_the_draft`.
+  Wheel-vs-wheel is the biggest gap (slot1-vs-slot9 **0.124**), slot1-vs-slot5
+  **0.047** — §5's structural prediction shows up in the numbers.
+- **ONLY ABOUT HALF THE TURNS ARE ROBUST TO QB TIMING — 7 to 10 of 17.** Every
+  plan is built under three positional-offset fits (`qb_cold` from the two 1-QB
+  seasons, `shipped`, `qb_hot` from 2025 alone; early-QB multipliers **0.089 /
+  0.173 / 0.241**) and the sheet marks any turn where the call changes. This is
+  the honest headline of M8: the single 2-QB draft in the league's history is not
+  enough to pin quarterback timing, and roughly half the draft is a bet on which
+  world you are in. The shipped fit reproduces 2025's first-QB TIMING (pick 6 vs
+  7) but understates QB **volume** — 3 in rounds 1-3 against ~5.6 scaled from
+  2025 — because `FORMAT_MATCH_WEIGHT` puts only 60% of the evidence on the
+  format-matched season.
+- **Conditional survival, not availability, is what decides a pick** — and it has
+  to exclude my own pick or it says nothing. "Lamar Jackson is 93% available at
+  pick 14" is a fact about the draft; "if I pass he comes back 96% of the time"
+  is a fact about my decision. Counting the sims where I took him makes every
+  player I want read as vanishing. A NaN (the policy NEVER passes) is the
+  strongest take-now signal and compares False against any threshold — flagged
+  explicitly rather than left to silently read as "not urgent".
+- **A VOR-ranked shortlist is useless in this league.** The board is QB-heavy and
+  the simulated league drafts quarterbacks late, so at a mid-draft turn the five
+  highest-VOR available players are all QBs the policy takes 0% of the time. The
+  sheet carries two lists instead: `candidates` (who I actually take, with
+  probability) and `slipping_away` (available, above replacement, does not come
+  back).
 
 **M7 findings:**
 - **M5's opponent model CANNOT move the league's positional mix, and running it

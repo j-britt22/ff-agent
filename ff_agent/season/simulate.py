@@ -126,8 +126,15 @@ def simulate(
 
     rng = np.random.default_rng(seed)
     offset = np.zeros((n_sims, 1, n))
-    if team_mean_sds:
-        msd = np.array([team_mean_sds.get(t, 0.0) for t in teams], dtype=float)
+    if team_mean_sds is not None:
+        missing = [t for t in teams if t not in team_mean_sds]
+        if missing:
+            raise ValueError(
+                f"team_mean_sds was given but omits {missing}. Defaulting a team "
+                "to zero uncertainty would silently make it the most predictable "
+                "team in the league."
+            )
+        msd = np.array([team_mean_sds[t] for t in teams], dtype=float)
         offset = rng.normal(0.0, np.maximum(msd, 1e-9), size=(n_sims, n))[:, None, :]
     scores = (rng.normal(mu, sd, size=(n_sims, n_weeks, n)) + offset).clip(min=0.0)
 

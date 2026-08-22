@@ -165,6 +165,12 @@ def kdst_frame(
                     f"{bad.height} D/ST in the draft pool did not resolve:\n"
                     f"{bad.select('espn_id', 'name')}"
                 )
+            dup = res.group_by("canonical_id").len().filter(pl.col("len") > 1)
+            if dup.height:
+                raise cw.CrosswalkError(
+                    f"{dup.height} D/ST resolved to a shared canonical id — the "
+                    f"ESPN pool listed a defense twice:\n{dup}"
+                )
             ids = res["canonical_id"].to_list()
             teams = rows["team"].to_list()
         else:
@@ -338,6 +344,16 @@ def build_pool(
 
 
 def _to_pool(df: pl.DataFrame) -> DraftPool:
+    # §0.2 again, at the last point before the simulator. The engine marks pool
+    # INDICES taken, not people, so a duplicated canonical_id lets two fantasy
+    # teams draft the same player in the same simulated draft.
+    dupes = df.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    if dupes.height:
+        raise ValueError(
+            f"{dupes.height} canonical_id(s) appear more than once in the draft "
+            f"pool. The simulator would let two teams draft the same person.\n"
+            f"{df.filter(pl.col('canonical_id').is_in(dupes['canonical_id'])).select('canonical_id', 'name', 'team', 'position')}"
+        )
     unknown = sorted(set(df["position"].to_list()) - set(POSITIONS))
     if unknown:
         raise ValueError(

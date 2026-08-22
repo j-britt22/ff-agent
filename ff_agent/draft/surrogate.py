@@ -47,15 +47,24 @@ FLEX_IDX = np.array([PL.POS_INDEX[p] for p in ("RB", "WR", "TE")])
 N_FLEX = STARTER_SLOTS.get("FLEX", 0)
 
 
-def weekly_scale(season_value: np.ndarray, bye_week: np.ndarray) -> np.ndarray:
-    """Season total -> per-week value over the weeks the player actually plays.
+def weekly_scale(season_value: np.ndarray, bye_week: np.ndarray = None) -> np.ndarray:
+    """Season total -> per-game value. Always 17.
 
-    Dividing by 17 would smear a player's bye across the season and then charge
-    him for it again when the bye week is simulated. A player with an NFL bye
-    plays 16.
+    An earlier version divided by 16 for anyone with a known bye, reasoning that
+    a bye costs a game. **That was wrong, and it inflated every player by 6.25%.**
+    The NFL plays 18 weeks and 17 GAMES: the bye is the eighteenth week, not one
+    of the seventeen. Measured on 2024 actuals, 215 players logged `games == 17`,
+    which is only possible if a full season is seventeen games.
+
+    Double-charging is prevented where it should be — at the week level in
+    ``_week_points``, which drops a player in his own bye week — and never
+    depended on the divisor. 17 is also what ``board/build.py``,
+    ``season/strength.py`` and ``projections/consensus.py`` all use, so this now
+    agrees with the rest of the pipeline instead of quietly disagreeing with it.
+
+    ``bye_week`` is accepted and ignored, so callers read symmetrically.
     """
-    plays = np.where((bye_week >= 1) & (bye_week <= GAMES), GAMES - 1, GAMES)
-    return season_value / plays
+    return season_value / GAMES
 
 
 @dataclass

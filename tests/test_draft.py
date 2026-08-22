@@ -59,6 +59,19 @@ def sim(pool, lookups):
 
 
 # ── pool ─────────────────────────────────────────────────────────────────────
+def test_no_player_appears_twice_in_the_pool(pool):
+    """§0.2 is about people, not just ids resolving.
+
+    ``model.project`` emitted one row per (player, prior NFL team) for anyone who
+    changed teams mid-season; those fanned out through blend()'s join and again
+    through the board's tier join, so 15 players reached the 2026 board FOUR
+    times each. The engine marks pool INDICES taken, so a duplicate lets two
+    fantasy teams draft the same person in one simulated draft.
+    """
+    d = pool.df.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    assert d.height == 0, f"duplicated players in the pool:\n{d}"
+
+
 def test_pool_carries_kickers_and_defenses(pool):
     """M4's board is skill-only; without these, 12% of the draft does not exist."""
     counts = dict(pool.df.group_by("position").len().iter_rows())
@@ -247,19 +260,33 @@ def test_vectorized_lineup_matches_optimal_lineup(pool):
     fast = SUR.lineup_stats(pool, roster, play_weeks=(3,))
     for i in range(roster.shape[0]):
         sub = pool.df[roster[i].tolist()].with_columns(
-            (pl.col("blended_points") / pl.when(
-                (pl.col("bye_week") >= 1) & (pl.col("bye_week") <= 17)
-            ).then(16).otherwise(17)).alias("weekly_points")
+            (pl.col("blended_points") / 17).alias("weekly_points")
         ).filter(pl.col("bye_week") != 3)
         assert abs(LU.lineup_points(sub, "weekly_points") - fast.mean[i]) < 1e-3
 
 
-def test_weekly_scale_charges_a_bye_once_not_twice():
-    pts = np.array([[160.0, 170.0]])
+def test_weekly_scale_divides_by_seventeen_games_not_sixteen():
+    """The NFL plays 18 WEEKS and 17 GAMES — the bye is the eighteenth week.
+
+    An earlier version divided by 16 for anyone with a bye, inflating every
+    player by 6.25% and silently disagreeing with board/build.py,
+    season/strength.py and projections/consensus.py, all of which use 17.
+    Measured on 2024 actuals, 215 players logged games == 17.
+    """
+    pts = np.array([[170.0, 170.0]])
     bye = np.array([[7, 0]], dtype=np.int8)
     w = SUR.weekly_scale(pts, bye)
-    assert w[0, 0] == pytest.approx(10.0)    # 16 games played
-    assert w[0, 1] == pytest.approx(10.0)    # no bye -> 17
+    assert w[0, 0] == pytest.approx(10.0)
+    assert w[0, 1] == pytest.approx(10.0)
+    assert w[0, 0] == w[0, 1], "a bye must not change the per-GAME rate"
+
+
+def test_weekly_scale_agrees_with_the_rest_of_the_pipeline():
+    from ff_agent.season import strength as ST
+    from ff_agent.projections import consensus as C
+    from ff_agent.board import build as BB
+
+    assert SUR.GAMES == ST.GAMES == C.GAMES_IN_SEASON == BB.GAMES == 17
 
 
 def test_free_bye_players_cost_nothing(pool):

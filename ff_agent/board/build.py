@@ -150,8 +150,32 @@ def build(season: int = SEASON, prior_season: int | None = None) -> pl.DataFrame
     )
 
 
+def assert_one_row_per_player(board: pl.DataFrame) -> None:
+    """§0.2, applied to the board itself.
+
+    "Every rostered and drafted player must resolve to exactly one canonical ID.
+    Assert it." Resolution is only half of that — a join that fans out breaks it
+    just as thoroughly, and silently. A duplicated row means the draft simulator
+    can hand the same real person to two different fantasy teams, because it
+    marks POOL INDICES taken, not people.
+    """
+    dupes = board.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    if dupes.height:
+        detail = (
+            board.filter(pl.col("canonical_id").is_in(dupes["canonical_id"]))
+            .select("canonical_id", "name", "position", "team", "blended_points")
+            .sort("canonical_id")
+        )
+        raise ValueError(
+            f"{dupes.height} canonical_id(s) appear more than once in the board "
+            f"({int(dupes['len'].sum())} rows). A join fanned out; find it rather "
+            f"than deduplicating here.\n{detail}"
+        )
+
+
 def write_board(season: int = SEASON) -> tuple[pl.DataFrame, str]:
     b = build(season)
+    assert_one_row_per_player(b)
     path = ARTIFACTS_DIR / "board.json"
     payload = {
         "season": season,

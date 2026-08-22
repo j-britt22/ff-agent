@@ -48,6 +48,14 @@ TTL_POLICY: dict[str, timedelta] = {
     "espn_rosters": timedelta(hours=1),
     "espn_draft": timedelta(days=1),
     "espn_settings": timedelta(days=1),
+    # draft_history spans COMPLETED seasons (2023-2025) in one table, so it is
+    # cached with season=None and effective_ttl()'s "a completed season never
+    # expires" rule can never engage for it. Without an entry here it fell back
+    # to DEFAULT_TTL and went stale every 24 hours — which is merely wasteful
+    # online, and breaks the §0.3 offline draft-day path, since M7's board,
+    # calibration and opponent model all read it. Long TTL rather than
+    # IMMUTABLE: a fourth season will eventually be added to it.
+    "draft_history": timedelta(days=90),
 }
 
 
