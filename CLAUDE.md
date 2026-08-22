@@ -192,10 +192,20 @@ still prompts and never guesses.
 - Stdlib and system fonts only: §0.3 needs this to work offline, and a webfont
   would fall back mid-draft.
 
-**Runnable against ANY ESPN league — ADDED 2026-08-22.** 346 tests pass.
+**Runnable against ANY ESPN league — ADDED 2026-08-22.** 348 tests pass.
 `ff_agent/live/profile.py` reads the league's shape from ESPN instead of
 trusting §1's constants, so the tool can be handed to somebody in a different
 league (`SETUP_ANY_LEAGUE.md`).
+- **The draft slot is detectable too, not just team shape.**
+  `draftSettings.pickOrder` — a list of `team_id`s in round-1 order — sits in
+  the same `mSettings` payload the position limits come from, whenever the
+  commissioner has set it. `cli gui --auto` reads it and needs no `--slot` at
+  all when it's there; asks for one, loudly, when it isn't. This is how
+  `draft_date_time` got resolved (§0.5 STILL OPEN, above) — `draftSettings.date`
+  was sitting right next to it. Both were available HOURS before §5's "~1hr
+  before" framing, on this league at least — that framing describes one
+  commissioner's habit, not a platform guarantee, so `--slot` stays as the
+  override for whenever it isn't set that early.
 - **Detection independently reproduces EVERY §1 constant** — team count, all
   seven starter slots, bench 7 / IR 1, the position maxima, byes {5,14},
   6 playoff teams, redraft. `tests/test_profile.py` asserts this, which is
@@ -290,7 +300,7 @@ uv run python -m ff_agent.cli draft --slot 6   # T-60 drill: file read, no compu
 uv run python -m ff_agent.cli live --slot 6    # M9 — the live draft loop (terminal)
 uv run python -m ff_agent.cli gui --slot 6     # M9 — the SAME loop in a browser
 uv run python -m ff_agent.cli setup            # ANY league: preflight + build its board
-uv run python -m ff_agent.cli gui --auto --slot 6  # ANY league: detect, don't assume §1
+uv run python -m ff_agent.cli gui --auto           # ANY league: detects slot AND shape
 uv run python -m ff_agent.cli mock             # M9 GATE — replay 2025 live
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
@@ -751,7 +761,17 @@ Everything §1 marked CONFIRM is now verified from the source, not inferred.
 | League history | **3 seasons: 2023, 2024, 2025.** All drafts + rosters cached |
 
 ### STILL OPEN
-- [ ] `draft_date_time` — unknown. If it compresses, triage order is 1 → 2 → 3 → 9.
+- [x] `draft_date_time` — **RESOLVED 2026-08-22.** `2026-08-22 18:30` — not
+      from asking, but because ESPN's `draftSettings.date` was just sitting in
+      the `mSettings` payload the whole time. `draftSettings.pickOrder` (a list
+      of `team_id`s in round-1 order) was there too, and it happened to already
+      have my slot — **4** — hours before the draft, contradicting §5's
+      "revealed ~1hr before" framing. §5 wasn't wrong that it's unknowable
+      *until the commissioner sets it*; it just doesn't say WHEN that happens,
+      and "roughly an hour before" is one commissioner's habit, not a platform
+      guarantee. `live/profile.py::_detect_slot` reads both fields now, and
+      `cli gui --auto` needs no `--slot` at all once they're set — it falls
+      back to asking for one when they aren't.
 - [ ] **M4 and M7 disagree on the QB count.** M4 says **TWO**, comparing a
       specific pair (Allen wk 7, Jackson wk 13, neither bye free) against the best
       upside stash: 17.9 points vs 26.4. M7 says **THREE**, over the distribution

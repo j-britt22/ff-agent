@@ -80,3 +80,24 @@ def test_the_flex_is_translated_from_espns_own_name(prof):
 def test_the_profile_is_readable_by_a_human(prof):
     s = prof.summary()
     assert prof.my_team_name in s and str(prof.n_teams) in s
+
+
+def test_the_draft_slot_is_detected_when_espn_has_published_it(prof):
+    """§5 treats the slot as unknowable before ~T-60, but ESPN's own
+    draftSettings.pickOrder is just sitting in the settings payload whenever
+    the commissioner has set it -- which can be well before T-60. `cli gui
+    --auto` should never need `--slot` once this is populated.
+    """
+    if prof.my_slot is None:
+        pytest.skip("this league has no published draft order right now")
+    assert 1 <= prof.my_slot <= prof.n_teams
+
+
+def test_a_detected_slot_seats_me_at_the_right_index():
+    from ff_agent.live import profile as PR
+
+    prof = PR.detect()
+    if prof.my_slot is None:
+        pytest.skip("this league has no published draft order right now")
+    seats = PR.managers_for_slot(prof, prof.my_slot)
+    assert seats[prof.my_slot - 1] == prof.my_manager

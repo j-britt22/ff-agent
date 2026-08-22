@@ -606,6 +606,15 @@ def cmd_setup(args) -> int:
     print("   " + prof.summary().replace("\n", "\n   "))
     for w in prof.warnings:
         print(f"   !! {w}")
+    if prof.draft_epoch_ms:
+        import datetime
+        when = datetime.datetime.fromtimestamp(prof.draft_epoch_ms / 1000)
+        print(f"   draft time: {when:%Y-%m-%d %H:%M}")
+    if prof.my_slot:
+        print(f"   your draft slot: {prof.my_slot} (ESPN has published the order — "
+              f"`gui --auto` will use this automatically)")
+    else:
+        print("   your draft slot: not published yet — pass --slot once you know it")
 
     print("\n3. Your draft board")
     cache = ARTIFACTS_DIR / f"pool_league_{prof.league_id}.parquet"
@@ -619,8 +628,13 @@ def cmd_setup(args) -> int:
         print(f"     {ps:4s} {n:24s} vor {vor:6.1f}")
 
     print("\n4. Ready")
-    print(f"   On draft day, once you know your slot (1..{prof.n_teams}):")
-    print(f"     uv run python -m ff_agent.cli gui --auto --slot N")
+    if prof.my_slot:
+        print(f"     uv run python -m ff_agent.cli gui --auto")
+        print(f"   (slot {prof.my_slot} will be detected automatically; "
+              f"add --slot N to override)")
+    else:
+        print(f"   On draft day, once you know your slot (1..{prof.n_teams}):")
+        print(f"     uv run python -m ff_agent.cli gui --auto --slot N")
     print("\n   Nothing in this tool ever submits to ESPN. You click. (§0.1)")
     return 0
 
@@ -644,12 +658,9 @@ def cmd_gui(args) -> int:
     from ff_agent.live.state import new_state
 
     season = args.season or SEASON
-    if not args.slot:
-        print("--slot is required. You learn it at T-60 (§5).")
-        return 2
-
     t0 = time.perf_counter()
     prof = None
+    slot = args.slot
     if args.auto:
         # Read the league instead of trusting §1's constants. This is what makes
         # the tool runnable by somebody in a different league.
@@ -663,9 +674,26 @@ def cmd_gui(args) -> int:
         print("\n" + prof.summary())
         for w in prof.warnings:
             print(f"  !! {w}")
-        if args.slot > prof.n_teams:
-            print(f"\nslot {args.slot} is outside 1..{prof.n_teams}")
+        if slot is None:
+            # ESPN publishes draftSettings.pickOrder once the commissioner sets
+            # it, which §5 treats as unknowable before ~T-60 but is really just
+            # "whenever the league sets it" — sometimes days out, sometimes not
+            # until the last hour. Read it if it's there; --slot is still the
+            # override for whenever it isn't, or is wrong.
+            if prof.my_slot is None:
+                print("\nESPN has not published a draft order for this league yet.")
+                print("  Pass --slot N once you know it (§5).")
+                return 2
+            slot = prof.my_slot
+            print(f"\n  detected your draft slot from ESPN: {slot} "
+                  f"(pass --slot to override)")
+        if slot > prof.n_teams:
+            print(f"\nslot {slot} is outside 1..{prof.n_teams}")
             return 2
+    elif not slot:
+        print("--slot is required. You learn it at T-60 (§5), or pass --auto to "
+              "detect it once ESPN has published the order.")
+        return 2
 
     if prof is None:
         pool = DPL.load_pool(ARTIFACTS_DIR)
@@ -673,8 +701,8 @@ def cmd_gui(args) -> int:
             print("no cached pool — building it (run `cli plans` before draft day)")
             pool = DPL.build_pool(season)
             DPL.save_pool(pool, ARTIFACTS_DIR)
-        managers = DDB.managers_for_slot(args.slot)
-        state = new_state(pool, args.slot, managers)
+        managers = DDB.managers_for_slot(slot)
+        state = new_state(pool, slot, managers)
         resolver = Resolver(pool)
         ctx = AD.load_context(season, pool, managers, state.rounds)
     else:
@@ -685,8 +713,8 @@ def cmd_gui(args) -> int:
             board = PR.build_board_for(prof, season)
             pool = DPL.build_pool(season, n_teams=prof.n_teams, board=board)
             DPL.save_pool(pool, ARTIFACTS_DIR, path=cache)
-        managers = PR.managers_for_slot(prof, args.slot)
-        state = new_state(pool, args.slot, managers, rounds=prof.roster_total)
+        managers = PR.managers_for_slot(prof, slot)
+        state = new_state(pool, slot, managers, rounds=prof.roster_total)
         resolver = Resolver(pool)
         try:
             ctx = AD.load_context(season, pool, managers, state.rounds)
@@ -697,17 +725,17 @@ def cmd_gui(args) -> int:
             print(f"  no opponent history ({type(e).__name__}) — "
                   f"drafting everyone off consensus")
             ctx = PR.neutral_context(pool, managers, state.rounds, season)
-    log = LG.SessionLog(LG.session_path(season, args.slot))
-    log.write("session", season=season, slot=args.slot, managers=managers,
+    log = LG.SessionLog(LG.session_path(season, slot))
+    log.write("session", season=season, slot=slot, managers=managers,
               pool_size=pool.n, interface="gui")
 
-    session = SV.DraftSession(state, resolver, ctx, season, args.slot,
+    session = SV.DraftSession(state, resolver, ctx, season, slot,
                               args.qb_cap, log)
     httpd = SV.serve(session, port=args.port)
     setup = time.perf_counter() - t0
     url = f"http://127.0.0.1:{args.port}/"
 
-    print(f"\nFIRST DOWN SYNDROME — live draft GUI, slot {args.slot} ({season})")
+    print(f"\nFIRST DOWN SYNDROME — live draft GUI, slot {slot} ({season})")
     print(f"  {pool.n} players · {state.total_picks} picks · ready in {setup:.1f}s")
     print(f"  logging to {log.path}")
     print(f"\n  OPEN: {url}\n")

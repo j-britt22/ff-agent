@@ -63,6 +63,8 @@ class LeagueProfile:
     my_bye_weeks: tuple[int, ...]
     is_keeper: bool
     uses_faab: bool
+    my_slot: int | None = None          # 1-based; None until ESPN sets the order
+    draft_epoch_ms: int | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -217,7 +219,35 @@ def detect(season: int | None = None, my_team_name: str | None = None) -> League
         prof.warnings.append(
             "this is a KEEPER league; the board values every player as though "
             "the whole pool is available, which overvalues anyone already kept")
+
+    prof.my_slot, prof.draft_epoch_ms = _detect_slot(lg, prof.my_team_id, prof.n_teams)
     return prof
+
+
+def _detect_slot(lg, my_team_id: int, n_teams: int) -> tuple[int | None, int | None]:
+    """Read the snake position ESPN has already assigned, if it has.
+
+    §5 says the slot is "revealed ~1hr before draft" and treats that as a
+    T-60 constraint the tool must survive without. It does not say the slot is
+    UNKNOWABLE before then — ``draftSettings.pickOrder`` is the commissioner's
+    round-1 order, and once the league sets it, it is just sitting there in the
+    settings payload, however far ahead of the draft that happens to be. This
+    reads it instead of assuming it can't be read; ``--slot`` remains the
+    override for whenever this comes back empty or wrong.
+    """
+    try:
+        req = getattr(lg, "espn_request", None)
+        raw = req.league_get(params={"view": "mSettings"}) if req else {}
+        ds = raw.get("settings", {}).get("draftSettings", {}) or {}
+        order = ds.get("pickOrder") or []
+        epoch = ds.get("date")
+    except Exception:
+        return None, None
+    if not order or my_team_id not in order:
+        return None, epoch
+    if ds.get("type") != "SNAKE" or len(order) != n_teams:
+        return None, epoch          # a shape this engine's snake math does not model
+    return order.index(my_team_id) + 1, epoch
 
 
 def _position_limits(lg, roster_total: int, warnings: list[str]) -> dict[str, int]:

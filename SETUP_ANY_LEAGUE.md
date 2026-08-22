@@ -60,7 +60,14 @@ the wrong team, add `--team "Your Team Name"`.
 
 ## 4. On draft day
 
-When you learn your draft slot:
+```bash
+uv run python -m ff_agent.cli gui --auto
+```
+
+It reads your draft slot from ESPN automatically, once your commissioner has
+set the draft order — `setup` (step 3) already told you whether that's done
+and what your slot is. If it isn't set yet, or you want to double check, pass
+it yourself:
 
 ```bash
 uv run python -m ff_agent.cli gui --auto --slot 4
