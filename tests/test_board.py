@@ -136,6 +136,80 @@ def test_tier_boundaries_survive_perturbation(board):
     assert board["tier_stability"].median() > 0.5
 
 
+def test_tier_stability_is_a_frequency(board):
+    """It is ``count / trials``, so it cannot exceed 1.
+
+    The 2026 board shipped 28 rows above 1.0, topping out at exactly 2.0 — the
+    signature of a player counted once per DUPLICATE ROW per trial. A field
+    documented as "how often each break survives" reading 2.0 is not a rounding
+    artefact, it is a duplicated player wearing a plausible-looking number.
+    """
+    assert board["tier_stability"].max() <= 1.0
+    assert board["tier_stability"].min() >= 0.0
+
+
+# ─── §0.2 — one row per player, and joins that cannot fan out ───────────────
+def test_board_has_exactly_one_row_per_player(board):
+    """§0.2's hard gate, at the board rather than at ID resolution.
+
+    Resolving to exactly one canonical ID is only half of it: a join that fans
+    out breaks the same rule just as thoroughly and far more quietly. The
+    simulator marks pool INDICES taken, not people, so a doubled row lets two
+    fantasy teams draft the same person in one simulated draft.
+    """
+    B.assert_one_row_per_player(board)
+    assert board.height == board["canonical_id"].n_unique()
+
+
+def test_tier_stability_refuses_duplicated_input():
+    """Where the >1.0 values were actually born.
+
+    Guarding here rather than only in build() means every caller gets the
+    failure, and it arrives naming the duplication rather than a strange
+    stability score fifty lines downstream.
+    """
+    df = pl.DataFrame({
+        "canonical_id": ["a", "b", "c", "d"],
+        "position": ["RB"] * 4,
+        "vor": [100.0, 60.0, 55.0, 10.0],
+    })
+    assert T.tier_stability(df, value="vor").height == 4
+
+    dup = pl.concat([df, df.head(1)])
+    with pytest.raises(ValueError, match="one row per canonical_id"):
+        T.tier_stability(dup, value="vor")
+
+
+def test_tier_stability_output_cannot_fan_out_a_join(board):
+    """The right-hand side of build()'s join, checked as a join key.
+
+    ``tier_stability`` emits one row per input ROW, not per player, which is
+    what turned 15 duplicated players into 60 board rows. Unique input, unique
+    output, height-preserving join.
+    """
+    stab = T.tier_stability(board.select("canonical_id", "position", "vor"),
+                            value="vor", trials=3)
+    assert stab.height == stab["canonical_id"].n_unique()
+    assert board.join(stab, on="canonical_id", how="left").height == board.height
+
+
+def test_build_refuses_to_join_duplicated_projections(monkeypatch):
+    """§0.2 must fail BEFORE the tier join, not after it.
+
+    ``write_board`` already asserted, but only once the damage was squared and
+    only on the path that writes the artifact — ``draft/pool.py`` and
+    ``draft/backtest.py`` call ``build()`` directly. Checking the left side
+    before the join is what makes the join unable to multiply rows at all.
+    """
+    from ff_agent.projections import board_inputs as BI
+
+    real = BI.build(SEASON)
+    monkeypatch.setattr(BI, "build", lambda *a, **k: pl.concat([real, real.head(1)]))
+
+    with pytest.raises(ValueError, match="the board's tier join"):
+        B.build(SEASON)
+
+
 # ─── §2.1 QB count, §10 alarms ──────────────────────────────────────────────
 def test_qb_count_decision_is_explicit(board):
     d = RV.qb_count_decision(board)

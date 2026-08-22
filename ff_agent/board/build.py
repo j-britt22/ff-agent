@@ -123,6 +123,13 @@ def build(season: int = SEASON, prior_season: int | None = None) -> pl.DataFrame
     )
 
     df = T.assign_tiers(df, value="vor")
+    # §0.2 checked BEFORE the join, which is the only place it does any good.
+    # tier_stability returns one row per input ROW, so it is the right-hand side
+    # here and inherits whatever duplication it was handed: a player arriving
+    # twice leaves this join four times, not twice. Asserting the left side
+    # first makes the join incapable of multiplying rows at all, instead of
+    # catching the squared damage downstream in write_board.
+    assert_one_row_per_player(df, stage="the board's tier join")
     stab = T.tier_stability(df, value="vor")
     df = df.join(stab, on="canonical_id", how="left")
 
@@ -150,7 +157,7 @@ def build(season: int = SEASON, prior_season: int | None = None) -> pl.DataFrame
     )
 
 
-def assert_one_row_per_player(board: pl.DataFrame) -> None:
+def assert_one_row_per_player(board: pl.DataFrame, stage: str = "the board") -> None:
     """§0.2, applied to the board itself.
 
     "Every rostered and drafted player must resolve to exactly one canonical ID.
@@ -158,16 +165,22 @@ def assert_one_row_per_player(board: pl.DataFrame) -> None:
     just as thoroughly, and silently. A duplicated row means the draft simulator
     can hand the same real person to two different fantasy teams, because it
     marks POOL INDICES taken, not people.
+
+    ``stage`` names where the check ran, because the same failure means
+    different things at different points: before the tier join it is upstream
+    duplication, after it the join itself multiplied rows.
     """
     dupes = board.group_by("canonical_id").len().filter(pl.col("len") > 1)
     if dupes.height:
+        cols = [c for c in ("canonical_id", "name", "position", "team",
+                            "blended_points", "vor") if c in board.columns]
         detail = (
-            board.filter(pl.col("canonical_id").is_in(dupes["canonical_id"]))
-            .select("canonical_id", "name", "position", "team", "blended_points")
+            board.filter(pl.col("canonical_id").is_in(dupes["canonical_id"].implode()))
+            .select(cols)
             .sort("canonical_id")
         )
         raise ValueError(
-            f"{dupes.height} canonical_id(s) appear more than once in the board "
+            f"{dupes.height} canonical_id(s) appear more than once in {stage} "
             f"({int(dupes['len'].sum())} rows). A join fanned out; find it rather "
             f"than deduplicating here.\n{detail}"
         )

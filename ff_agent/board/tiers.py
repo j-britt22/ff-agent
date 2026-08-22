@@ -68,7 +68,27 @@ def tier_stability(
 
     Risk control, not decoration: presenting a cliff that only exists at one
     exact projection would be false precision.
+
+    Requires one row per ``canonical_id`` (§0.2), and refuses anything else.
+    Duplicated input breaks this function twice over. The count is incremented
+    once per ROW per trial, so a player present twice reports
+    ``2 x trials / trials = 2.0`` — impossible for a field documented as a
+    frequency, and the 2026 board shipped 28 such rows. And the returned frame
+    inherits the duplicate, so joining it back onto the caller's frame SQUARES
+    the duplication rather than merely passing it through.
     """
+    dupes = df.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    if dupes.height:
+        cols = [c for c in ("canonical_id", "name", "position", "team", value)
+                if c in df.columns]
+        detail = (df.filter(pl.col("canonical_id").is_in(dupes["canonical_id"].implode()))
+                  .select(cols).sort("canonical_id"))
+        raise ValueError(
+            f"tier_stability needs one row per canonical_id; {dupes.height} "
+            f"id(s) appear more than once ({int(dupes['len'].sum())} rows). "
+            f"Deduplicating here would hide a join that fanned out upstream — "
+            f"find that join instead.\n{detail}"
+        )
     rng = np.random.default_rng(seed)
     base = assign_tiers(df, value=value).select(
         "canonical_id", "position", pl.col("tier").alias("base_tier")

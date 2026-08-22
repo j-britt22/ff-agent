@@ -352,7 +352,7 @@ def _to_pool(df: pl.DataFrame) -> DraftPool:
         raise ValueError(
             f"{dupes.height} canonical_id(s) appear more than once in the draft "
             f"pool. The simulator would let two teams draft the same person.\n"
-            f"{df.filter(pl.col('canonical_id').is_in(dupes['canonical_id'])).select('canonical_id', 'name', 'team', 'position')}"
+            f"{df.filter(pl.col('canonical_id').is_in(dupes['canonical_id'].implode())).select('canonical_id', 'name', 'team', 'position')}"
         )
     unknown = sorted(set(df["position"].to_list()) - set(POSITIONS))
     if unknown:
