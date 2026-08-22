@@ -7,6 +7,8 @@
     uv run python -m ff_agent.cli score       # M2 GATE — scores vs ESPN
     uv run python -m ff_agent.cli project     # M3 — build projections
     uv run python -m ff_agent.cli project --backtest   # M3 GATE — beats consensus?
+    uv run python -m ff_agent.cli draftsim    # M7 — draft_sim.json (all 9 slots)
+    uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
     uv run python -m ff_agent.cli settings    # refresh league settings JSON
     uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
     uv run python -m ff_agent.cli offline     # prove the offline path works
@@ -409,6 +411,92 @@ def cmd_simulate(args) -> int:
     return 0
 
 
+def cmd_draftsim(args) -> int:
+    """M7: Monte Carlo draft simulator -> draft_sim.json, plus the §11 gate."""
+    from ff_agent.draft import backtest as DBT
+    from ff_agent.draft import build as DB
+
+    if args.validate:
+        print("=== §11 GATE: reproduce the 2025 draft's broad shape ===")
+        print("  8 teams, real draft order, opponent model fit on 2023-24 ONLY.")
+        print("  Pool is WIDER than the players actually drafted — anything else")
+        print("  would hand the simulator the answer.\n")
+        rep = DBT.report(n_sims=args.sims)
+        print(f"  {rep['actual_picks']} actual picks, pool of {rep['pool_size']}, "
+              f"{rep['n_sims']} sims\n")
+        for name, arm in rep["arms"].items():
+            q, c = arm["qb_timing"], arm["calibration"]
+            mark = "  <-- THE GRADE" if name == rep["graded_arm"] else ""
+            print(f"─── {name}{mark}")
+            print(f"    first QB       actual {q['actual_first_qb_pick']:>3}   "
+                  f"sim {q['sim_first_qb_pick_median']:>3} "
+                  f"{q['sim_first_qb_pick_p10_p90']}   "
+                  f"inside={q['actual_first_qb_in_sim_interval']}")
+            print(f"    QBs in 3 rds   actual {q['actual_qbs_in_first_3_rounds']:>3}   "
+                  f"sim {q['sim_qbs_in_first_3_rounds_median']:>3} "
+                  f"{q['sim_qbs_in_first_3_rounds_p10_p90']}   "
+                  f"inside={q['actual_qb_count_in_sim_interval']}")
+            print(f"    composition    mean|err| "
+                  f"{arm['composition']['mean_abs_share_error']}")
+            print(f"    {c['verdict']}")
+        print("\n  The QB error FLIPS SIGN between the first two arms: without the")
+        print("  positional offsets the simulator takes far too many quarterbacks")
+        print("  early (following superflex ECR), and with offsets fitted on two")
+        print("  ONE-QB seasons it takes far too few. The truth sits between them,")
+        print("  which is M5's format-change finding arriving from a new direction.")
+        print("\nIs the interval width just the ADP kernel? (sigma sweep)")
+        with WIDE:
+            print(DBT.sigma_sensitivity(n_sims=max(args.sims // 4, 500)))
+        return 0
+
+    path = DB.write(season=args.season or SEASON, n_sims=args.sims)
+    print(f"wrote {path}\n")
+    import json
+    d = json.loads(__import__("pathlib").Path(path).read_text())
+
+    print("EDGE DECOMPOSITION — how much of the simulated margin is real?")
+    with WIDE:
+        print(pl.DataFrame(d["edge_decomposition"]))
+    print("  model_seat must sit at ~0: it is me drafting exactly like the model.")
+    print("  best_consensus carries ZERO board edge, so its margin is bought")
+    print("  entirely from M5's opponents picking with an 8-pick spread.\n")
+
+    tbl = pl.DataFrame(d["by_slot_and_policy"]).drop("roster_shape", "sanity_alarms")
+    print("BY SLOT AND POLICY")
+    with WIDE:
+        print(tbl.sort(["slot", "p_title"], descending=[False, True]))
+
+    print("\n§2.1 — HOW MANY QUARTERBACKS? (uncapped VOR takes FOUR, every time)")
+    with WIDE:
+        print(pl.DataFrame(d["qb_cap_sweep"]))
+    print("  VOR is measured against the STARTER replacement level (QB18), so it")
+    print("  prices QB3 and QB4 as if they would start. They will not — I start two.")
+    print("  M4 answered this question TWO on a ceiling comparison; M7 answers it")
+    print("  over the distribution of QBs I actually get, on expected points. They")
+    print("  measure different things — see the open question in CLAUDE.md.")
+
+    print("\n§2.4 — is roster variance actually good?")
+    with WIDE:
+        print(pl.DataFrame(d["surrogate"]["variance_slope"]))
+    x = d["surrogate"]["variance_crossover"]
+    print(f"  title crossover at delta {x['title_crossover_delta']}, "
+          f"top-2 crossover at delta {x['top2_crossover_delta']}")
+    print("  §2.4 says variance is good, full stop. It is good BELOW the")
+    print("  crossover and costs seeding above it — and the top-2 crossover")
+    print("  comes first, so the first-round bye is what variance spends.")
+
+    print(f"\nSURROGATE: {d['surrogate']['verdict']}")
+    print("\nSEAT SENSITIVITY — opponents' slots are unknown:")
+    with WIDE:
+        print(pl.DataFrame(d["seat_sensitivity"]))
+
+    alarms = sorted({a for s in d["by_slot_and_policy"] for a in s["sanity_alarms"]})
+    print("\n§10 SANITY ALARMS (my seat): " + ("none" if not alarms else ""))
+    for a in alarms:
+        print(f"  !! {a}")
+    return 1 if alarms else 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -487,6 +575,10 @@ def main(argv=None) -> int:
     p.add_argument("--season", type=int); p.add_argument("--sims", type=int, default=20000)
     p.add_argument("--validate", action="store_true")
     p.set_defaults(fn=cmd_simulate)
+    p = sub.add_parser("draftsim")
+    p.add_argument("--season", type=int); p.add_argument("--sims", type=int, default=10000)
+    p.add_argument("--validate", action="store_true")
+    p.set_defaults(fn=cmd_draftsim)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)

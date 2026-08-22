@@ -152,7 +152,17 @@ top-1 accuracy **3.1% → 6.3%**, top-5 21.9% → 27.3%.
 Mechanics verified; the §11 standings test does **not** pass cleanly, and the
 diagnosis is recorded rather than tuned away.
 
-**Next: M7 (Monte Carlo draft simulator), then M8 (nine slot plans).**
+**M7 (Monte Carlo draft simulator → `draft_sim.json`) — COMPLETE 2026-08-21.**
+256 tests pass. Gate: replay the 2025 draft (8 teams, real order, my real slot 7,
+opponent model fit on **2023–24 only**, pool of 290 against 136 actual picks).
+**Graded arm CALIBRATED — 78% coverage against an 80% target, on intervals 35
+picks wide (26% of the draft).** Runs at ~11s per slot at 10,000 sims.
+
+**Next: M8 (nine slot plans → `plan_1..9.json`), then M9 (live draft loop).**
+
+**M9 design constraint, stated by the human 2026-08-21:** the live draft agent
+must hand over **a concrete shortlist of players to choose from**, not a score or
+a strategy note. Build M8's plans so that shortlist falls out of them directly.
 
 ```bash
 uv run python -m ff_agent.cli status      # cache inventory + staleness
@@ -165,10 +175,12 @@ uv run python -m ff_agent.cli xfp --validate      # M3b — xFP + validity tests
 uv run python -m ff_agent.cli board       # M4 — VOR/tiers/byes -> board.json
 uv run python -m ff_agent.cli opponents --validate  # M5 — opponents.json + gate
 uv run python -m ff_agent.cli simulate --validate   # M6 — season_sim.json
+uv run python -m ff_agent.cli draftsim            # M7 — draft_sim.json, 9 slots
+uv run python -m ff_agent.cli draftsim --validate  # M7 GATE — replay 2025
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 221 pass
+uv run pytest                             # 256 pass
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`
@@ -239,6 +251,107 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+
+**M7 findings:**
+- **M5's opponent model CANNOT move the league's positional mix, and running it
+  forward is the only way that shows.** Manager tilts are
+  `log(manager rate / league rate)`, so across eight managers they cancel; the
+  aggregate mix is therefore whatever superflex ECR implies. Simulating 2025 off
+  the shipped model took the **first QB at pick 1** (median) and **10 QBs inside
+  three rounds**. The league actually took the first at **7**, and **five**.
+  Fixed with a (phase × position) log-offset fitted by iterative proportional
+  fitting (`draft/calibrate.py`). Fitting offsets makes gate measure (a) true by
+  construction, which is stated loudly rather than quietly banked.
+- **The offsets add structure, not vagueness — proved with a σ sweep.** At the
+  shipped `ADP_SIGMA = 0.055`: **with** offsets 77% coverage on 35-pick
+  intervals; **without**, reaching 81% needs a 104-pick interval (77% of the
+  whole draft). No kernel width reaches the offset arm's precision. `ADP_SIGMA`
+  was reasoned, never fitted, and a sweep on M5's own log-prob gate prefers a
+  *wider* kernel (−3.66 at σ=0.2 vs −4.89 at 0.055) while `top1` and median rank
+  barely move — log-prob is optimised by hedging, which is the wrong objective
+  for a simulator. **Left at M5's shipped value.**
+- **The QB error FLIPS SIGN between the two arms, which measures the format
+  change from a new direction.** No offsets → 10 QBs in 3 rounds (too many,
+  following superflex ECR). Offsets fit on two ONE-QB seasons → 2 (too few).
+  Actual 5, between them. An in-sample **lookahead ceiling** arm gets 4 [2,6] and
+  the first QB at 5 [1,13] — so the mechanics are sound and the miss is the
+  format change, exactly the structure of M6's ceiling test.
+- **Most of the simulator's apparent edge is not real, and there is now a number
+  for it.** `best_consensus` — a control policy with **zero** board edge, ranking
+  by the same superflex ECR the opponent model is built on — beats the model by
+  **+29.9 weekly points**, against `best_vor`'s **+32.1**. So the board
+  contributes **+2.2** and the rest is bought from M5's opponents drafting with
+  an 8-pick spread. Consistent with M3's +0.0034 Spearman. `model_seat` (me
+  drafting exactly like the model) lands at **−1.5**, confirming no seat bias.
+  **Compare policies and slots to each other; do not read the absolute level.**
+- **UNCAPPED VOR TAKES FOUR QUARTERBACKS IN THE FIRST FIVE ROUNDS, EVERY TIME.**
+  Not a policy bug — the board really does rank Allen/Jackson/Maye/Burrow at VOR
+  167/148/147/122. The flaw is using VOR for a bench pick at all: **VOR is
+  measured against the STARTER replacement (QB18), so it prices QB3 and QB4 as
+  though they would start**, in a league that starts two. This is M4's flagged
+  risk ("if it is wrong, it is wrong in the first two rounds") arriving as a
+  concrete draft-day behaviour. Cap sweep at slot 5, weekly points vs league:
+
+  | QB cap | `best_vor` | `need_weighted` |
+  |---|---|---|
+  | 2 | +31.6 | +36.5 |
+  | **3** | **+33.5** | **+39.2** |
+  | 4 | +32.1 | +38.2 |
+
+- **§2.4's "roster variance is good" is TRUE ONLY BELOW A CROSSOVER, and the
+  top-2 crossover comes FIRST.** Measured directly (40k sims per point, no
+  surrogate), season-mean uncertainty sd 1 → 12:
+
+  | delta | P(title) | P(top-2) |
+  |---|---|---|
+  | −15 | 0.010 → **0.036** (3.6×) | 0.023 → 0.073 |
+  | 0 | 0.103 → **0.146** (+41%) | 0.208 → 0.272 |
+  | +15 | 0.345 → 0.352 (flat) | 0.627 → **0.591** |
+  | +30 | 0.597 → **0.577** | 0.914 → **0.853** |
+
+  Crossovers: title at **delta +15.9**, top-2 at **delta +12.1**. Above it,
+  variance spends the first-round bye — the thing §2.4 itself calls worth about
+  as much as everything else combined. **Chase ceiling when average or behind;
+  protect the mean once clearly ahead.** §2.4 states this without qualification
+  and is right only for the first case.
+- **M4's board is skill-only; K and D/ST had to be built in M7.** 537 QB/RB/WR/TE
+  and zero K or D/ST, because superflex ECR ranks skill positions only. Without
+  them **18 of 153 picks — 12% of the draft — do not exist** and every
+  availability curve is off by a round. Added from ESPN's pool by
+  `percent_owned`, valued off the M3 rank→points curve (which already covers both
+  under §1), timed from this league's own history: K mean pick fraction **0.855**,
+  DST **0.779**, one each per team in **26/26** and **27/27** cases. Weaker than
+  the skill projections and proportionate — §3.5 says stream both. Backtests use
+  a `prior_season` source instead, since ESPN's ownership percentages are today's.
+- **The Rams trap bit again.** nflverse `LA` vs ESPN `LAR` would have handed the
+  Rams K and D/ST a 17-week season with no bye. Now normalised and asserted.
+- **The opponent model had NO roster constraints at all** — it was only ever
+  asked to score picks that had already happened. Run forward it drafted eight
+  QBs and no tight end, then fielded lineups with empty slots; the gap against a
+  constrained policy was **~50 points a week**, which is how the omission
+  announced itself. `policy.allowed_positions` now applies ESPN's maxima and
+  starter feasibility to **every** team.
+- **A season-mean-uncertainty term was added to M6's simulator** (`team_mean_sds`,
+  opt-in, default off, existing behaviour unchanged). Weekly noise is redrawn
+  every week; projection error is not — being wrong about a player is being wrong
+  in all fourteen weeks, and correlated error moves standings far more than
+  independent noise of the same size.
+- **Bilinear interpolation clamps SILENTLY at the grid edge.** The surrogate's
+  first run fixed the grid at −30..+30 while draft outcomes reached **+49**,
+  scoring **0.21** absolute error on P(title) that looked exactly like an
+  interpolation result — every sample *inside* the grid was accurate to 0.003.
+  The grid is now sized from the simulated range and the clamped fraction is
+  reported. After the fix: error **0.021** against a mean policy gap of 0.075.
+  The validator had already refused to rank policies at 0.21, which is the
+  machinery working.
+- **§10's alarms are about MY roster, not the league's.** Running "only 1 QB
+  after round 11" across all eight simulated opponents turns an alarm into a fact
+  about rivals. Split into `sanity_alarms(team)` and `league_diagnostics()`.
+- Seat assignment is unknown (I learn my slot at T−60 and never learn theirs).
+  Reshuffling opponents moves my mean by **0.4 weekly points**, so filling seats
+  in config order is an earned shortcut.
+- `need_weighted` beats `best_vor` at **every** slot, by 0.053–0.090 P(title),
+  and the margin shrinks monotonically from slot 1 to slot 9.
 
 **M6 findings:**
 - **§2.5 CLOSED — the league seeds on WIN PERCENTAGE**, confirmed from the live
@@ -389,6 +502,12 @@ Everything §1 marked CONFIRM is now verified from the source, not inferred.
 
 ### STILL OPEN
 - [ ] `draft_date_time` — unknown. If it compresses, triage order is 1 → 2 → 3 → 9.
+- [ ] **M4 and M7 disagree on the QB count.** M4 says **TWO**, comparing a
+      specific pair (Allen wk 7, Jackson wk 13, neither bye free) against the best
+      upside stash: 17.9 points vs 26.4. M7 says **THREE**, over the distribution
+      of quarterbacks actually drafted, scoring expected weekly points rather than
+      ceiling. They do not measure the same thing. Resolve in M8, where the slot
+      plans have to commit to one.
 - [ ] League **team count changed every year** (2023: 8, 2024: 10, 2025: 8, 2026: 9).
       Positional-run dynamics do not transfer cleanly across seasons — M5 must
       weight by roster-slot count, not treat the three drafts as one sample.

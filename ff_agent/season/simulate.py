@@ -98,8 +98,19 @@ def simulate(
     n_sims: int = 20_000,
     seeding_rule: str = SEEDING_RULE,
     seed: int = 7,
+    team_mean_sds: dict[str, float] | None = None,
 ) -> SimResult:
-    """Run the season ``n_sims`` times and return seeding/title probabilities."""
+    """Run the season ``n_sims`` times and return seeding/title probabilities.
+
+    ``team_sds`` is week-to-week noise, redrawn every week. ``team_mean_sds`` is
+    a different animal: uncertainty in the season mean itself, drawn ONCE per
+    simulated season and applied to every week. Added for M7, where two rosters
+    can share a projected mean and differ in how sure that projection is.
+
+    The distinction matters because correlated error moves standings far more
+    than independent noise of the same size — being wrong about a player is
+    being wrong in all fourteen weeks. Omit it and behaviour is unchanged.
+    """
     if seeding_rule not in SEEDING_RULES:
         raise ValueError(f"seeding_rule must be one of {SEEDING_RULES}")
 
@@ -114,7 +125,11 @@ def simulate(
     sd = np.array([(team_sds or {}).get(t, LEAGUE_WEEKLY_SD) for t in teams], dtype=float)
 
     rng = np.random.default_rng(seed)
-    scores = rng.normal(mu, sd, size=(n_sims, n_weeks, n)).clip(min=0.0)
+    offset = np.zeros((n_sims, 1, n))
+    if team_mean_sds:
+        msd = np.array([team_mean_sds.get(t, 0.0) for t in teams], dtype=float)
+        offset = rng.normal(0.0, np.maximum(msd, 1e-9), size=(n_sims, n))[:, None, :]
+    scores = (rng.normal(mu, sd, size=(n_sims, n_weeks, n)) + offset).clip(min=0.0)
 
     games = SCH.matchups(season)
     wins = np.zeros((n_sims, n), dtype=np.int32)
@@ -145,7 +160,8 @@ def simulate(
     made[rows, order[:, :PLAYOFF_TEAMS]] = True
     top2[rows, order[:, :FIRST_ROUND_BYES]] = True
 
-    playoff_scores = rng.normal(mu, sd, size=(n_sims, 3, n)).clip(min=0.0)
+    # the same season-long mean error carries into the bracket
+    playoff_scores = (rng.normal(mu, sd, size=(n_sims, 3, n)) + offset).clip(min=0.0)
     champ = _bracket(order[:, :PLAYOFF_TEAMS], playoff_scores)
     title = np.zeros((n_sims, n), dtype=bool)
     title[np.arange(n_sims), champ] = True

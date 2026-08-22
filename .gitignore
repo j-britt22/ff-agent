@@ -38,6 +38,7 @@ artifacts/board.json
 artifacts/plan_*.json
 artifacts/opponents.json
 artifacts/season_sim.json
+artifacts/draft_sim.json
 artifacts/*.pdf
 
 # ─── Logs (§10 requires recommendation logs; keep them local) ────────────────
