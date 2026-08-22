@@ -101,3 +101,68 @@ def test_a_detected_slot_seats_me_at_the_right_index():
         pytest.skip("this league has no published draft order right now")
     seats = PR.managers_for_slot(prof, prof.my_slot)
     assert seats[prof.my_slot - 1] == prof.my_manager
+
+
+# ── the seat order, not just my seat ─────────────────────────────────────────
+# The first version of `_detect_slot` read `draftSettings.pickOrder` — the WHOLE
+# round-1 order — and returned only my own index from it. Every other seat was
+# then filled in ESPN's team_id order, so the GUI named the wrong manager on the
+# clock and `record_index` attributed each pick to that wrong manager. My own
+# slot was correct, which is precisely why it looked right. These pin the whole
+# order, offline, against a stub.
+
+
+class _StubProfile:
+    """Enough of a LeagueProfile to exercise the seating, with no network."""
+
+    @staticmethod
+    def make(my_slot, draft_order):
+        return PR.LeagueProfile(
+            season=2026, league_id="x", league_name="stub", n_teams=4,
+            my_team_id=1, my_team_name="mine", my_manager="me",
+            managers=["me", "b", "c", "d"], team_ids=[1, 2, 3, 4],
+            starter_slots={"QB": 1}, bench_slots=1, ir_slots=0, roster_total=2,
+            position_maxima={}, playoff_teams=2, regular_season_weeks=14,
+            my_bye_weeks=(), is_keeper=False, uses_faab=False,
+            my_slot=my_slot, draft_order=draft_order,
+        )
+
+
+def test_seats_follow_espns_published_order_not_team_id_order():
+    # ESPN says round 1 goes 3, 1(me), 4, 2 — which is NOT team_id order.
+    p = _StubProfile.make(my_slot=2, draft_order=[3, 1, 4, 2])
+    assert PR.managers_for_slot(p, 2) == ["c", "me", "d", "b"]
+    assert p.warnings == []
+
+
+def test_the_old_team_id_shortcut_would_have_failed_this():
+    """Guard the guard: the fallback really does give a different answer."""
+    p = _StubProfile.make(my_slot=2, draft_order=[3, 1, 4, 2])
+    p.draft_order = []                      # simulate "no published order"
+    assert PR.managers_for_slot(p, 2) == ["b", "me", "c", "d"]
+
+
+def test_a_slot_override_is_obeyed_but_says_the_seats_are_guesses():
+    p = _StubProfile.make(my_slot=2, draft_order=[3, 1, 4, 2])
+    seats = PR.managers_for_slot(p, 4)
+    assert seats[3] == "me"                 # the human's override wins (§6)
+    assert any("overrides ESPN's published order" in w for w in p.warnings)
+
+
+def test_a_published_order_that_contradicts_itself_is_refused_loudly():
+    p = _StubProfile.make(my_slot=2, draft_order=[3, 4, 1, 2])   # me at seat 3
+    seats = PR.managers_for_slot(p, 2)
+    assert seats[1] == "me"                 # still seats me where asked
+    assert any("does not seat you where expected" in w for w in p.warnings)
+
+
+def test_detected_order_matches_the_live_league(prof):
+    """Against the real league: every seat, not just mine."""
+    if prof.my_slot is None or not prof.draft_order:
+        pytest.skip("this league has no published draft order right now")
+    seats = PR.managers_for_slot(prof, prof.my_slot)
+    assert len(seats) == prof.n_teams
+    assert seats[prof.my_slot - 1] == prof.my_manager
+    by_id = dict(zip(prof.team_ids, prof.managers))
+    assert seats == [by_id[t] for t in prof.draft_order]
+    assert sorted(seats) == sorted(prof.managers)   # a permutation, no drops

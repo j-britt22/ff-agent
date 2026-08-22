@@ -713,7 +713,16 @@ def cmd_gui(args) -> int:
             board = PR.build_board_for(prof, season)
             pool = DPL.build_pool(season, n_teams=prof.n_teams, board=board)
             DPL.save_pool(pool, ARTIFACTS_DIR, path=cache)
+        seen_warnings = len(prof.warnings)
         managers = PR.managers_for_slot(prof, slot)
+        # managers_for_slot can only discover a seating problem once it is asked
+        # for a specific slot, which is after the summary above has printed.
+        for w in prof.warnings[seen_warnings:]:
+            print(f"  !! {w}")
+        if prof.draft_order and managers[slot - 1] == prof.my_manager:
+            print("\n  draft order (ESPN's own):")
+            for i, m in enumerate(managers, start=1):
+                print(f"    {i}. {m}" + ("   <- you" if i == slot else ""))
         state = new_state(pool, slot, managers, rounds=prof.roster_total)
         resolver = Resolver(pool)
         try:

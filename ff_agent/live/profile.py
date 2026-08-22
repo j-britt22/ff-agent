@@ -65,6 +65,8 @@ class LeagueProfile:
     uses_faab: bool
     my_slot: int | None = None          # 1-based; None until ESPN sets the order
     draft_epoch_ms: int | None = None
+    team_ids: list[int] = field(default_factory=list)   # parallel to `managers`
+    draft_order: list[int] = field(default_factory=list)  # team_ids, round-1 order
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -185,9 +187,11 @@ def detect(season: int | None = None, my_team_name: str | None = None) -> League
 
     names = _owner_names(me)
     managers = []
+    team_ids = []
     for t in teams:
         n = _owner_names(t)
         managers.append(canonical_manager(n[0]) if n else f"team {t.team_id}")
+        team_ids.append(int(t.team_id))
 
     if not my_byes:
         warnings.append(
@@ -203,6 +207,7 @@ def detect(season: int | None = None, my_team_name: str | None = None) -> League
         my_team_name=normalize_team_name(me.team_name),
         my_manager=canonical_manager(names[0]) if names else "me",
         managers=managers,
+        team_ids=team_ids,
         starter_slots=starters,
         bench_slots=bench,
         ir_slots=ir,
@@ -220,12 +225,15 @@ def detect(season: int | None = None, my_team_name: str | None = None) -> League
             "this is a KEEPER league; the board values every player as though "
             "the whole pool is available, which overvalues anyone already kept")
 
-    prof.my_slot, prof.draft_epoch_ms = _detect_slot(lg, prof.my_team_id, prof.n_teams)
+    prof.my_slot, prof.draft_epoch_ms, prof.draft_order = _detect_slot(
+        lg, prof.my_team_id, prof.n_teams)
     return prof
 
 
-def _detect_slot(lg, my_team_id: int, n_teams: int) -> tuple[int | None, int | None]:
-    """Read the snake position ESPN has already assigned, if it has.
+def _detect_slot(
+    lg, my_team_id: int, n_teams: int
+) -> tuple[int | None, int | None, list[int]]:
+    """Read the snake order ESPN has already assigned, if it has.
 
     §5 says the slot is "revealed ~1hr before draft" and treats that as a
     T-60 constraint the tool must survive without. It does not say the slot is
@@ -234,20 +242,29 @@ def _detect_slot(lg, my_team_id: int, n_teams: int) -> tuple[int | None, int | N
     settings payload, however far ahead of the draft that happens to be. This
     reads it instead of assuming it can't be read; ``--slot`` remains the
     override for whenever this comes back empty or wrong.
+
+    Returns the WHOLE order, not just my index. The first version of this
+    returned only ``order.index(my_team_id) + 1`` and threw the rest away, which
+    left every OTHER seat to be filled in ESPN's team_id order — so the GUI named
+    the wrong manager on the clock, and `record_index` attributed each pick to
+    that wrong manager. My own slot was right, which is exactly why it looked
+    fine. The order is free once the payload is open; use all of it.
     """
     try:
         req = getattr(lg, "espn_request", None)
         raw = req.league_get(params={"view": "mSettings"}) if req else {}
         ds = raw.get("settings", {}).get("draftSettings", {}) or {}
-        order = ds.get("pickOrder") or []
+        order = [int(t) for t in (ds.get("pickOrder") or [])]
         epoch = ds.get("date")
     except Exception:
-        return None, None
+        return None, None, []
     if not order or my_team_id not in order:
-        return None, epoch
+        return None, epoch, []
     if ds.get("type") != "SNAKE" or len(order) != n_teams:
-        return None, epoch          # a shape this engine's snake math does not model
-    return order.index(my_team_id) + 1, epoch
+        return None, epoch, []      # a shape this engine's snake math does not model
+    if len(set(order)) != len(order):
+        return None, epoch, []      # a team twice in round 1 is not a snake
+    return order.index(my_team_id) + 1, epoch, order
 
 
 def _position_limits(lg, roster_total: int, warnings: list[str]) -> dict[str, int]:
@@ -287,13 +304,41 @@ def _position_limits(lg, roster_total: int, warnings: list[str]) -> dict[str, in
 def managers_for_slot(prof: LeagueProfile, slot: int) -> list[str]:
     """Seat order for a detected league, with me at ``slot``.
 
+    Prefers ESPN's OWN ``pickOrder`` when it is published and agrees with the
+    slot being used, so every seat is named correctly and not just mine. M7
+    measured that reshuffling the opponents moves my mean by only 0.4 weekly
+    points, which is why the fallback below is acceptable — but that measurement
+    is about simulated VALUE, and the seat order is also what names the manager
+    on the clock and what `record_index` attributes each pick to. Those are wrong
+    or right, not approximately right, so the real order is used whenever it
+    exists rather than treated as an optimisation.
+
     ``draft.build.managers_for_slot`` reads §1's hardcoded OPPONENTS tuple; this
-    is the same idea driven by whoever is actually in the league. M7 measured
-    that reshuffling the opponents moves my mean by 0.4 weekly points, so the
-    order of the OTHER seats is an earned shortcut — only my own slot matters.
+    is the same idea driven by whoever is actually in the league.
     """
     if not 1 <= slot <= prof.n_teams:
         raise ValueError(f"slot {slot} is outside 1..{prof.n_teams}")
+
+    if prof.draft_order and slot == prof.my_slot:
+        by_id = dict(zip(prof.team_ids, prof.managers))
+        seats = [by_id.get(tid, f"team {tid}") for tid in prof.draft_order]
+        # Only trust it if it actually seats ME where the caller says I am; a
+        # published order that disagrees is a contradiction, not a tiebreak.
+        if len(seats) == prof.n_teams and seats[slot - 1] == prof.my_manager:
+            if len(set(seats)) != len(seats):
+                prof.warnings.append(
+                    "two seats share a manager name; the ORDER is ESPN's and is "
+                    "correct, but per-manager tendencies will be pooled")
+            return seats
+        prof.warnings.append(
+            "ESPN's published pick order does not seat you where expected; "
+            "falling back to team order for the opponents")
+    elif prof.draft_order and prof.my_slot is not None:
+        prof.warnings.append(
+            f"slot {slot} overrides ESPN's published order (which says "
+            f"{prof.my_slot}), so opponent seats are team order, not the real "
+            f"draft order — the manager named on the clock may be wrong")
+
     others = [m for m in prof.managers if m != prof.my_manager]
     if len(others) != prof.n_teams - 1:
         # duplicate or missing manager names — fall back to seat labels so the
