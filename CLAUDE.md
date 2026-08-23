@@ -339,7 +339,48 @@ ESPN's draft export otherwise (`--source espn`).
   draft GUI is still running at ~39% CPU, and both pass standalone. Verified by
   removing every M10a change and re-running: the failure is byte-identical.
 
-**Next: M10b (in-season jobs incl. `/week14`).**
+**M10b (in-season monitor) — DESIGNED 2026-08-23, not yet built.**
+Full plan: `docs/M10B_MONITOR_DESIGN.md`. A Docker container on an always-on box runs
+the §9.1 cadence, recomputes ROS value and Δ P(title) with the M2–M7 engines, and
+**emails** an ordered list of actions. §0.1 holds absolutely: it recommends, I click.
+Settled: home box + Docker Compose + supercronic · **email only** · deterministic core
+with a narrow Claude layer for news and prose · `TZ=America/New_York`, asserted.
+
+Four reconnaissance findings shape it, all measured 2026-08-23:
+
+- **THERE IS NO FORMAT-MATCHED REST-OF-SEASON CONSENSUS.** `rsf` — the superflex list
+  M3 shipped on — is scraped **preseason only**: one snapshot at 2025-09-05, then
+  nothing until the next August. In-season the weekly-updating lists are
+  `do dp drk dsf ro rp wo wp wsf`. Only `wsf` is superflex-and-redraft, and it is
+  **this week only**. `ro`/`rp` are rest-of-season but **1-QB**: on 2025-10-31 `ro`'s
+  top 24 held **zero** QBs against `wsf`'s **13**, and `ro`'s overall #1 was a
+  linebacker (the page ships IDP-polluted). M5 already recorded the consequence of
+  ignoring format — "format difference posing as personality" — and here it would
+  manufacture fake waiver value at QB, exactly where §9.3 says to spend priority.
+  **Resolution: anchor ROS on POINTS, not RANKS.** ESPN's per-week projected points are
+  already in §1 scoring and points carry no format; `wsf` serves the weekly jobs, where
+  it is exactly right; `rp` is a non-QB cross-check only.
+- **The historical FA pool IS reconstructible, so the §11 step 10 gate is possible.**
+  `League.load_roster_week(week)` hits `mRoster` with `scoringPeriodId`;
+  `League.transactions(scoring_period, types={FREEAGENT, WAIVER, WAIVER_ERROR})` gives
+  adds, drops and **failed claims**; `League.box_scores(week)` gives `slot_position`,
+  i.e. what was actually STARTED. `WAIVER_ERROR` is the only observed counterfactual in
+  the league and is what calibrates §9.3's P(claim succeeds).
+- **`player_owned_espn` is null in-season** (0 of 6,038 `wsf` rows from Oct 2025), so
+  the obvious "trending adds" control is rebuilt from the transaction log instead —
+  "most-added player across the league that week", which is what the other eight
+  managers actually did rather than a proxy for it.
+- **ESPN carries per-week `projected_points` AND `points_breakdown`** (per-rule applied
+  points — M2's Layer A object). So the M2 gate becomes a **weekly tripwire**: this
+  league already changed its scoring once, after 2024.
+
+Two shipped modules need changes: `season/simulate.py` must accept completed results
+(it re-simulates all 14 weeks, which is wrong from week 2 on), and
+`season/strength.py::roster_strength` hardcodes `/17` where in-season needs remaining
+games. And a gift: M7 needed the P(title) surrogate to score 10,000 rosters; a weekly
+job scores ~30, so **M10b can afford the real simulator**.
+
+**Next: M10b-1 (container, scheduler, notifier, pre-flight) — shippable alone.**
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
 must hand over **a concrete shortlist of players to choose from**, not a score or
