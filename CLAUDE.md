@@ -374,11 +374,43 @@ Four reconnaissance findings shape it, all measured 2026-08-23:
   points — M2's Layer A object). So the M2 gate becomes a **weekly tripwire**: this
   league already changed its scoring once, after 2024.
 
+- **THE LINEUP DOES NOT LOCK ALL AT ONCE, and the lock calendar is not weekly-periodic.**
+  ESPN locks each player at HIS OWN kickoff, so "set the lineup" is a sequence of
+  irreversible per-slot commitments under increasing information. Measured on the real
+  2026 schedule: **week 1 opens on a WEDNESDAY** (9/9 20:20, with Thursday at 20:35 not
+  20:15); **week 16 — my semifinal — has three Christmas Day games** (12/25 at 13:00,
+  16:30, 20:15); **week 15 has two Saturday games** (17:00, 20:20); Sunday's late slate
+  is TWO windows (16:05 and 16:25); and 2025 week 4 had a **Sunday 09:30 London kick**.
+  Six to nine distinct lock times a week, worst in the fantasy playoffs. §9.1's four
+  fixed slots would miss the Wednesday opener, all three Christmas games, and the whole
+  Sunday late slate. **Resolution: derive checkpoints from the schedule, never the
+  clock** — the crontab becomes a 15-minute tick and `clock.py` fires at kickoff −24h,
+  −3h and **−75min** (inactives drop at −90). Consequence: `season/lineup.py::optimal_lineup`
+  needs `pinned={canonical_id: slot}`, since once Thursday locks the rest must be solved
+  AROUND a fixed partial assignment. And the Thursday call is not "who is better" — it is
+  `E[p] > E[best Sunday alternative chosen under SUNDAY information]`, a strictly higher
+  bar, decided by M9's force-and-simulate pattern. Two effects partly cancel and BOTH get
+  measured: locking forfeits the option on that slot, but a Thursday player who *starts*
+  reveals my partial score three days early and sharpens Sunday's floor/ceiling posture —
+  benching him preserves nothing, since he is locked out either way.
+- **AVAILABILITY BY DESIGNATION, and the QB asymmetry is large.** nflverse `injuries`
+  keys on **`gsis_id`** — joins straight to canonical, no crosswalk hop. 2025 REG, skill
+  positions, P(did not play | Friday designation): Questionable **0.418**, Doubtful and
+  Out 1.000, and *no designation* **0.149**, which is the size of the measurement bias
+  (the proxy is absence from the weekly stats table, which conflates inactive with
+  "dressed and recorded nothing"). Two sub-findings: **a Questionable QB is 0.735 against
+  a Questionable RB's 0.360** — roughly double, and in a 2-QB league that is where it
+  matters; and **full practice participation does NOT separate from limited** (0.421 vs
+  0.404), which is the opposite of the folk rule a hand-written heuristic would encode.
+  Redo against snap counts over 2016-2025 in M10b-4; recorded now because the positional
+  asymmetry survives any plausible bias correction and the Thursday decision turns on it.
+
 Two shipped modules need changes: `season/simulate.py` must accept completed results
 (it re-simulates all 14 weeks, which is wrong from week 2 on), and
 `season/strength.py::roster_strength` hardcodes `/17` where in-season needs remaining
-games. And a gift: M7 needed the P(title) surrogate to score 10,000 rosters; a weekly
-job scores ~30, so **M10b can afford the real simulator**.
+games; and `season/lineup.py` needs slot pinning (above). And a gift: M7 needed the
+P(title) surrogate to score 10,000 rosters; a weekly job scores ~30, so **M10b can
+afford the real simulator**.
 
 **Next: M10b-1 (container, scheduler, notifier, pre-flight) — shippable alone.**
 

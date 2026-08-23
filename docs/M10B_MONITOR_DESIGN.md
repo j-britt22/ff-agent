@@ -163,6 +163,94 @@ if a rule says it should. Stated plainly rather than papered over. The fix is in
 and it takes about two minutes; the design also keeps the notifier behind an
 interface so a push channel is a ~30-line addition, never a rewrite.
 
+
+### F9. The lineup does not lock all at once, and the lock calendar is not weekly-periodic
+
+ESPN locks each player individually at **his own game's kickoff**. So "set the lineup"
+is not one decision — it is a sequence of irreversible per-slot commitments made under
+increasing information, and the sequence is a different shape every week.
+
+Measured on the real 2026 schedule (`nflverse` `schedules`, which already carries
+2026 with `weekday`, `gameday` and `gametime`):
+
+| 2026 week | Lock times for that week |
+|---|---|
+| **1** | **Wed 9/9 20:20** · Thu 9/10 **20:35** · Sun 13:00 / 16:25 / 20:20 · Mon 20:15 |
+| 15 *(playoff R1)* | Thu 12/17 · **Sat 12/19 17:00** · **Sat 12/19 20:20** · Sun 13:00 / 16:05 / 16:25 / 20:20 · Mon |
+| 16 *(semifinal)* | Thu 12/24 · **Fri 12/25 13:00** · **Fri 12/25 16:30** · **Fri 12/25 20:15** · Sun ×4 · Mon |
+| 17 *(final)* | Thu 12/31 · Sun 1/3 13:00 / 16:05 / 16:25 / 20:20 · Mon 1/4 |
+
+That is **six to nine distinct lock times per week**, and the irregularities land
+exactly where §2.4 says the value is:
+
+- **Week 1 opens on a WEDNESDAY.** The first lock of the 2026 season is not Thursday.
+- **Week 16 — my semifinal — has three Christmas Day games**, all Friday.
+- **Week 15 — my quarterfinal — has two Saturday games**, at 17:00 and 20:20.
+- Thursday kickoff is not even a fixed time: 20:35 in week 1, 20:15 thereafter.
+- Sunday's "late" window is really **two** windows twenty minutes apart, 16:05 and 16:25.
+- 2025 had a **Sunday 09:30 London kickoff** in week 4 — which a fixed 11:15 check
+  misses by nearly two hours.
+
+§9.1's four fixed slots (Thu 12:00 · Sat 10:00 · Sun 09:00 · Sun 11:15) would miss the
+Wednesday opener entirely, miss all three Christmas games, run its Saturday check
+seven hours before a 17:00 Saturday kickoff, and leave the whole Sunday late slate with
+no inactive check at all.
+
+**Resolution: derive decision points from the schedule, never from the clock.** The
+crontab becomes a frequent tick; `clock.py` decides whether a checkpoint is due from
+the actual kickoff times of *my own starters*. That is robust to Wednesday openers,
+Christmas, London, Saturday playoff games and flex scheduling without a single
+special case.
+
+### F10. Availability by injury designation, measured — and the QB asymmetry is large
+
+The option value of waiting is mostly the probability that a player's status *changes*,
+so it needs `P(does not play | Friday designation)`. `nflverse` `injuries` carries
+`report_status` and `practice_status` weekly and keys on **`gsis_id`** — it joins
+straight to our canonical ID with no crosswalk hop.
+
+2025 regular season, skill positions, against appearance in the weekly stats table:
+
+| Friday designation | n | P(did not play) |
+|---|---|---|
+| *(on report, no designation)* | 942 | **0.149** ← baseline artefact |
+| Questionable | 352 | 0.418 |
+| Doubtful | 26 | 1.000 |
+| Out | 430 | 1.000 |
+
+Two things in the Questionable split are worth more than the headline:
+
+| Questionable, by position | n | P(did not play) |
+|---|---|---|
+| **QB** | 34 | **0.735** |
+| TE | 67 | 0.418 |
+| WR | 165 | 0.382 |
+| RB | 86 | 0.360 |
+
+| Questionable, by practice | n | P(did not play) |
+|---|---|---|
+| Did not participate | 43 | 0.512 |
+| Limited | 223 | 0.404 |
+| **Full participation** | 76 | **0.421** |
+
+1. **A Questionable QB is a different animal.** Roughly twice the absence rate of a
+   Questionable skill player. Plausible mechanism: a QB who cannot go is replaced
+   outright and takes no snap, while a WR who suits up nearly always records
+   *something*. In a 2-QB league that is the position where this matters most, and it
+   is also where §9.3 says waiver priority gets spent.
+2. **Full practice participation does NOT separate from Limited** — 0.421 against
+   0.404. The folk rule ("full practice Friday means he plays") does not hold on this
+   data. Small cell (n=76), so suggestive rather than settled, but it is the opposite
+   of the assumption a hand-written rule would encode.
+
+**Caveats, because the levels are biased upward.** "Did not appear in the weekly stats
+table" conflates a true inactive with a player who dressed and recorded nothing. The
+no-designation row's **0.149** is a direct estimate of that bias, so the honest read is
+roughly *Questionable ≈ 0.27, Questionable QB ≈ 0.59* once it is subtracted. One
+season, and Doubtful has 26 rows. M10b-4 redoes this properly against snap counts
+across 2016–2025; it is recorded here because the positional asymmetry is large enough
+to survive any plausible correction, and it is the term the Thursday decision turns on.
+
 ---
 
 ## 3. ARCHITECTURE
@@ -178,8 +266,10 @@ interface so a push channel is a ~30-line addition, never a rewrite.
 │  │                                                               │   │
 │  │  supercronic ── crontab ──┬─ jobs.waivers    (Tue 08:00 ET)   │   │
 │  │                           ├─ jobs.freeagents (Wed 08:00)      │   │
-│  │                           ├─ jobs.lineup     (Thu 12:00, Sun 09:00) │
-│  │                           ├─ jobs.inactives  (Sun 11:15)  ★   │   │
+│  │                           ├─ jobs.tick       (every 15 min) ★ │   │
+│  │                           │    └─ clock.py fires a lineup     │   │
+│  │                           │       checkpoint when a kickoff   │   │
+│  │                           │       is 24h / 3h / 75min away    │   │
 │  │                           ├─ jobs.injuries   (Sat 10:00)      │   │
 │  │                           ├─ jobs.trades     (Mon 09:00)      │   │
 │  │                           ├─ jobs.refresh    (Tue 05:00)      │   │
@@ -207,14 +297,14 @@ modules named in §3.3.
 
 ```
 ff_agent/inseason/
-  clock.py        # what week is it; which jobs are due; ET handling; wk 5/14 guards
+  clock.py        # week + LOCK CALENDAR; which checkpoint is due; ET; wk 5/14 guards
   state.py        # league state as of week W: rosters, FA pool, waiver order, records
   freeagents.py   # the FA pool, resolved through §0.2 — unresolved REPORTED, never dropped
   ros.py          # rest-of-season projections (F1's resolution)
   weekly.py       # single-week projections: matchup, implied total, weather
   value.py        # roster -> Δ P(title). the common currency for every recommendation
   waivers.py      # §9.3 ordered claim list, P(success), who will clear to Wednesday
-  lineup.py       # §9.2 start/sit — wraps season/lineup.py with weekly projections
+  lineup.py       # §5.3 the lineup SEQUENCE — lock state, TNF option value, checkpoints
   trades.py       # §9.4 two-sided search across all eight opponents
   dst.py          # §3.5 + ADD-§F streaming: opponent YARDS, not points
   kicker.py       # §3.5 + ADD-§E
@@ -245,6 +335,9 @@ Surfacing these now because they are the only places M10b reaches back into ship
 2. **`season/strength.py::roster_strength` divides `blended_points` by 17.** In-season
    the divisor is *remaining* games, and the numerator is ROS points. Parameterise;
    the preseason call site keeps its current behaviour byte-for-byte.
+3. **`season/lineup.py::optimal_lineup` cannot pin a slot.** It assumes every player is
+   simultaneously assignable, which stops being true the moment a Thursday player locks
+   (**F9**). Needs `pinned={canonical_id: slot}`; see §5.3.
 
 **A gift from the calendar:** M7 needed the P(title) surrogate because it had to score
 10,000 rosters per slot. In-season a job scores perhaps 20–40 candidate rosters. So
@@ -264,18 +357,42 @@ debugging cycle. The surrogate stays available for the trade search's first pass
 | `refresh` | Tue 05:00 | Ingest last week's results; re-fit ROS; re-run the season sim; run the F2 scoring tripwire | only on failure |
 | `waivers` | Tue 08:00 | **Ordered** claim list, priority-spend call, P(each claim succeeds), who will clear to Wednesday | always |
 | `freeagents` | Wed 08:00 | Post-clear sweep — who actually cleared, grab now at **zero** priority cost. §9.3 says a lot of the edge is here | if anything cleared |
-| `lineup` | Thu 12:00 | TNF decisions. **Irreversible after 16:00** | if a TNF player is involved |
 | `injuries` | Sat 10:00 | Friday designations; every Q/D flagged with practice participation | if a starter is Q or worse |
-| `lineup` | Sun 09:00 | Full optimal lineup, floor-vs-ceiling posture from the matchup (§9.2) | always |
-| `inactives` ★ | **Sun 11:15** | Inactives drop ~90 min before kickoff. Final swap | **only if a starter is out** |
+| `lineup` ★ | **schedule-derived** | The lineup sequence — see below and §5.3 | on a change, or a lock inside 3h |
 | `trades` | Mon 09:00 | Two-sided search across all eight rosters; opponent roster profiles | if any candidate clears threshold |
 | `week14` | wk 14 Tue | §2.2 free-week churn — playoff-only value, zero downside | always |
 | `heartbeat` | daily 07:00 | Cookies valid · cache fresh · last successful run of every job | **only when something is wrong** |
 
+### The lineup job has no fixed time, because the NFL has no fixed schedule
+
+Per **F9**, kickoffs are not weekly-periodic — 2026 opens on a **Wednesday**, my
+semifinal has **three Christmas Day games**, my quarterfinal has two Saturday games,
+and Sunday's late slate is two windows twenty minutes apart. So `lineup` is not a cron
+time. The crontab runs a cheap **tick every 15 minutes**, and `clock.py` fires a
+checkpoint only when one is actually due:
+
+| Checkpoint | Fires at | Emails |
+|---|---|---|
+| **Advisory** | 24h before the week's **first** lock — once per week | Always. The full lineup, every window, one message |
+| **Confirm** | 3h before **each** lock window | Only if that window's call changed since the last email |
+| **Inactives** ★ | **kickoff − 75 min**, each window | Only if a starter in that window is out or downgraded |
+| **Monday close** | 3h before the last Monday kick | Only when two Monday-eligible players make a swap possible |
+
+**Checkpoints are not emails.** Nine checkpoints a week that each sent a message would
+be precisely the fatigue §6.4 warns about, and the digest would stop being read by
+October. Only the weekly advisory is unconditional; every later checkpoint is a silent
+re-check that speaks **only when the answer moved**. A typical week is one email plus
+zero or one more; a bad week is four, and every one of them is load-bearing.
+
+A tick with nothing due exits in well under a second and sends nothing. On 2026 week 15
+that schedules checkpoints around the Thursday game, both Saturday kicks, all four
+Sunday windows and Monday night — nine or so — against §9.1's four fixed slots, and
+without a special case for the Wednesday opener, Christmas, London or flex scheduling.
+
 **Two schedule facts specific to me.** My season ends in **week 13** (§2.2), so waiver
 aggression front-loads and the `trades` job escalates its urgency through weeks 11–13,
 then flips entirely to weeks 15–17 value in week 14. And **weeks 5 and 14 are my
-fantasy byes** — the lineup jobs must no-op those weeks, loudly, because §10 lists "a
+fantasy byes** — the lineup tick must no-op those weeks, loudly, because §10 lists "a
 lineup being set for week 5 or week 14" as an alarm meaning something is broken.
 
 ---
@@ -320,7 +437,148 @@ delta of **+15.9** and against it above, with the top-2 crossover arriving first
 **+12.1**. §2.4 states "roster variance is good" without qualification; it is true
 only below that line, and the monitor should know which side of it I am on.
 
-### 5.3 The waiver engine (`waivers.py`) — the core deliverable
+### 5.3 The lineup sequence (`lineup.py`) — Thursday, the gap, and Sunday
+
+Per **F9**, a lineup is not a decision, it is a schedule of decisions. This module owns
+that schedule.
+
+#### The state, not the answer
+
+One `LineupState` per week. Every rostered player carries a `lock_at` timestamp — from
+ESPN's own per-player `game_date`, which is authoritative because ESPN is what enforces
+the lock, cross-checked against nflverse `gameday + gametime`. A disagreement between
+the two is an **alarm, never an average**: it means one of them has the wrong game.
+
+Each slot is then in exactly one of three states, and the emails never re-litigate the
+first one:
+
+| State | Meaning | What the digest does with it |
+|---|---|---|
+| `locked` | Kickoff has passed | Shows it greyed, with actual points once final. No advice |
+| `open` | Kickoff is in the future | Advises; shows the deadline |
+| `at_risk` | Open, but the recommended player is Q / D / trending out | Advises, and flags the fallback and the check time |
+
+#### The Thursday decision is not "who is better"
+
+Starting a Thursday player is **option-destroying**. Once he is in, that slot cannot
+respond to anything that happens Friday, Saturday or Sunday morning. So the bar is not
+*"is p better than the best alternative I can see today"* — it is:
+
+```
+start Thursday player p  iff
+    E[p]  >  E[ best Sunday alternative, chosen under SUNDAY information ]
+```
+
+which is a strictly higher bar, because the Sunday choice gets to be made knowing
+things Thursday does not. Computed with the same force-and-simulate pattern M9 used at
+the draft table, and for the same reason — the counterfactual is what decides it:
+
+```
+for each candidate Thursday commitment c:                # who goes in which slot
+    draw N Sunday information states:
+        availability ~ F10's P(plays | designation, practice, position)
+        plus a modest continuous revision term on those who play
+    for each state:  solve optimal_lineup(remaining players, pinned=c)
+    value(c) = mean total
+choose argmax; report the gap to the runner-up
+```
+
+#### Two effects that partly cancel, and both get measured rather than asserted
+
+1. **Option cost.** Locking a slot forfeits the ability to react on that slot. This is
+   the effect everyone knows about, and it argues against Thursday starts.
+2. **Information value, which cuts the other way and is usually missed.** A Thursday
+   player who *starts* tells me my partial score three days early, which sharpens
+   Sunday's floor-versus-ceiling posture on every remaining slot (§9.2, and M7's
+   measured variance crossover at a roster delta of **+15.9**). Benching him does not
+   preserve any flexibility — he is locked out either way — so this is a real argument
+   *for* the Thursday start that the naive "never lock in early" instinct discards.
+
+When the two players are close the option cost usually dominates, but the penalty is
+smaller than "never lock early" implies. The simulation above captures both without
+either being hand-tuned: pinning `c` removes flexibility, and the Sunday solve happens
+under a drawn information state. **Whether the machinery beats naively starting the
+higher projection is the M10b-4 gate**, not an assumption.
+
+#### The gap between Thursday and Sunday
+
+Between the Thursday lock and the Sunday slate, three things change: Friday's official
+game-status designations, Saturday's practice reports and beat news, and Sunday's
+inactive lists. The weekly advisory covers the whole lineup once; after that a
+checkpoint only speaks when the answer moved, and when it does it reports only:
+
+- **what changed since the last one** — never the whole lineup again;
+- **what is still open**, with the current call and the runner-up;
+- **what is already locked**, greyed out, with actual points when final;
+- **the next deadline**, always, in one line at the top.
+
+#### The Sunday sequence, derived from kickoffs
+
+Inactives drop ninety minutes before each kickoff. So the checkpoint is
+**kickoff − 75 minutes for every distinct window containing one of my starters**, not a
+fixed hour. On 2026 week 15 that means checks before 17:00 and 20:20 Saturday, before
+13:00, 16:05, 16:25 and 20:20 Sunday, and before 20:15 Monday.
+
+§9.1's single "Sun ~11:15" is *fifteen minutes early* for the official 1pm-slate drop,
+covers none of the late slate, and misses a 09:30 London game by two hours. It
+described one slate, and the week has six.
+
+#### Monday night is the only decision made against a known number
+
+By Monday evening my opponent's score is final or nearly so. If a starter and a bench
+player are both on Monday night, that swap is decided under **certainty about the
+target** rather than a projection — the one place all week where §9.2's floor-versus-
+ceiling rule needs no forecast, and where §2.4's "chase variance when behind" is either
+exactly right or exactly wrong with nothing in between. Narrow (it needs two
+Monday-eligible players) but free to support once the state machine exists.
+
+#### What this needs that does not exist yet
+
+1. **`optimal_lineup(players, pinned={canonical_id: slot})`.** The solver assumes every
+   player is simultaneously assignable. Once Thursday locks, the rest must be solved
+   *around* a fixed partial assignment. The existing optimality argument survives —
+   pinning only removes players and slots from the free problem, and the FLEX still
+   accepts a superset of what the strict slots do — but it gets the same brute-force
+   assertion test on random rosters that `optimal_lineup` already has.
+2. **The availability model** from **F10**, redone against snap counts over 2016–2025
+   rather than one season of a stats-table proxy.
+3. **Projection snapshots on every run.** ESPN does not retain projection *history* —
+   a past week's projected points is whatever it last was — so the revision
+   distribution cannot be reconstructed backwards. Snapshotting our own inputs every
+   run costs nothing and is the only way this is ever measurable properly. By 2027
+   there is a real dataset; until then the availability event carries the model, which
+   is honest because the binary out/in event dominates the continuous revision anyway.
+
+#### Guardrails specific to a lineup that arrives by email
+
+- **Weeks 5 and 14: no lineup, ever.** §10 lists a lineup set in either as a sign
+  something is broken. The job asserts and no-ops.
+- **A locked slot cannot be advised on.** The state machine makes it unrepresentable
+  rather than merely discouraged.
+- **A recommendation that arrives after its deadline is worse than none.** Every email
+  leads with the deadline, and the job refuses to send a lineup change with under
+  twenty minutes of runway — it escalates the subject line instead.
+- **Clock skew breaks all of this silently.** If the container clock drifts, every lock
+  time is wrong and nothing looks wrong. The heartbeat checks it.
+
+#### What the Sunday email looks like
+
+```
+Subject: [FDS URGENT] wk 7 — Nacua OUT. 1 swap, deadline 12:58
+
+  NEXT LOCK  Sun 13:00 ET, in 74 min  ·  4 slots open, 3 locked
+
+  ▸ SWAP   WR2   Puka Nacua (OUT, 11:31 inactives)  →  Jayden Reed
+           +4.1 pts · +0.6% title · Reed is the only WR with a 13:00 kick
+           and a route share above 70%
+
+    HOLD   RB2   Bucky Irving (Q, limited Fri)  — plays; F10 puts a Q RB at
+           ~36% out, and the fallback loses 5.2 pts. Re-checked at 12:45.
+
+  LOCKED   QB1 Allen 24.8 · QB2 Maye 19.1 · TE Bowers (Thu, 14.2)
+```
+
+### 5.4 The waiver engine (`waivers.py`) — the core deliverable
 
 §9.3's rule, made concrete:
 
@@ -402,7 +660,7 @@ of anything — M10a already recorded what happens when that guard is lifted
 ("KICKER WORSHIP": Texans D/ST + Brandon Aubrey came back as the better pair at nine
 consecutive picks).
 
-### 5.4 The trade finder (`trades.py`) — "analyse other people's teams"
+### 5.5 The trade finder (`trades.py`) — "analyse other people's teams"
 
 Runs weekly and profiles all eight opponents whether or not it finds a trade.
 
@@ -444,7 +702,7 @@ zero, one starter contributes.
 From roughly week 9, weeks 15–17 schedule strength and December rest-risk enter the
 score. Output is a **copy-pasteable message plus the ESPN trade URL**. I send it. §0.1.
 
-### 5.5 Standings and the common currency (`value.py`)
+### 5.6 Standings and the common currency (`value.py`)
 
 Every recommendation in every job reports Δ P(championship) (§8, §2.4). One module owns
 `roster → (weekly mean, uncertainty) → P(title)` so the waiver engine, the trade finder
@@ -459,7 +717,7 @@ better every week as actual results replace forecasts, so the band should visibl
 narrow — and if it doesn't, that is itself worth knowing. ESPN's own `playoff_pct`
 (F5) sits in the same table as an independent check.
 
-### 5.6 Playoffs and `/week14`
+### 5.7 Playoffs and `/week14`
 
 From ~week 10 a **playoff view** appears in every digest: roster strength scored over
 weeks 15–17 only, with December weather exposure and "team likely to rest starters
@@ -472,7 +730,7 @@ entirely, absorb risk I would never take in-season, and drop anyone who cannot h
 the bracket. The §10 alarm that fires on "a lineup being set for week 14" stays armed
 throughout — this job explicitly does not set one.
 
-### 5.7 The news layer (`news.py`) — the only LLM in the loop
+### 5.8 The news layer (`news.py`) — the only LLM in the loop
 
 A Claude API call with web search, scoped to the `.claude/agents/news-scout.md` brief
 already in the repo: depth-chart changes, snap/route/carry inflections, injury
@@ -635,6 +893,7 @@ morning via F3's `load_roster_week` + `transactions`.
 | Arm | Measured against | Control |
 |---|---|---|
 | **Lineup** | Points gained vs what was actually started (`box_scores[].slot_position`) | ESPN's own projection-optimal lineup |
+| **Thursday call** | Points gained by the option-value-aware commitment | **Naively starting the higher projection** |
 | **Waivers** | ROS points added **to the starting lineup** by the top claim | **The most-added player across the league that week** (F4) |
 | **P(claim succeeds)** | Predicted vs observed | — calibration only, on `WAIVER_ERROR` rows |
 | **Trades** | Positive-sum under both value functions; not bad in hindsight | — weak arm, stated as weak |
@@ -665,7 +924,7 @@ beat "take whoever the league is adding", **we ship the control and say so.**
 | **M10b-1** Infrastructure | Container, scheduler, notifier, heartbeat, pre-flight, logging | A job runs on schedule in the container and emails; a deliberately broken cookie produces the fix-it email and no digest; a deliberately stale cache **blocks** the send; `TZ` asserted; §0.1 scan passes |
 | **M10b-2** ROS projections | `ros.py` | Walk-forward on 2025 wk 4–13 beats the anchor — **or is recorded as not beating it**, and the anchor ships |
 | **M10b-3** Waiver engine | `waivers.py`, `freeagents.py`, `dst.py`, `kicker.py` | Beats the most-added control on the 2025 replay; P(success) calibrated on `WAIVER_ERROR`; unresolvable FAs reported, never dropped |
-| **M10b-4** Lineup + inactives | `lineup.py`, `weekly.py`, the Sunday job | Beats what was actually started, and beats ESPN's projection-optimal lineup; wk 5/14 no-op asserted |
+| **M10b-4** Lineup sequence | `lineup.py`, `weekly.py`, `clock.py`'s lock calendar | Beats what was actually started **and** ESPN's projection-optimal lineup; **the option-value-aware Thursday call beats naively starting the higher projection — or it is dropped**; every 2025 lock window reproduced from the schedule; wk 5/14 no-op asserted |
 | **M10b-5** Trades | `trades.py` | Every proposal positive-sum under both value functions; each names its wedge; §2.3 penalty visible |
 | **M10b-6** Playoffs + `/week14` | `playoffs.py`, `week14.py` | Playoff view scores weeks 15–17 only; `/week14` recommends no lineup and prices week 14 at zero |
 
@@ -725,6 +984,12 @@ reason — saving the time:
       with week-N stats attached?** Almost certainly the latter, which is why F3's
       `load_roster_week` reconstruction is the plan of record — but worth five minutes
       to confirm, because if it is the former the backtest gets simpler.
+- [ ] **Does ESPN lock a player at kickoff, or at the start of the scoring period?**
+      The design assumes per-player kickoff locking, which is ESPN's documented
+      behaviour and what `BoxPlayer.game_date` implies. Worth confirming against a
+      real Thursday in week 1 before the playoffs depend on it — the whole §5.3
+      state machine rests on it, and week 16's Christmas games are where being
+      wrong would cost the most.
 - [ ] **Which odds source?** The Odds API's free tier (500 requests/month) is ample at
       §10's hourly-max caching, but needs NFL coverage verified. ESPN's own odds are
       already behind cookies we hold. Decide in M10b-4, not before.
@@ -741,10 +1006,12 @@ reason — saving the time:
 
 By week 3 of the 2026 season: a Tuesday email listing claims in priority order with a
 Δ P(title) beside each and a named reason; a Wednesday email saying which of last
-night's predictions cleared; a Sunday 11:15 email only when a starter is out; a Monday
-trade report that names its wedge; and a daily heartbeat I never see because nothing is
-wrong. And a `logs/inseason_2026.jsonl` that, in January, can tell me exactly how much
-of it was real.
+night's predictions cleared; a lineup email before each of that week's actual lock
+windows, leading with the deadline and covering only what is still open; an inactives
+email at kickoff minus 75 **only** when a starter is out; a Monday trade report that
+names its wedge; and a daily heartbeat I never see because nothing is wrong. And a
+`logs/inseason_2026.jsonl` that, in January, can tell me exactly how much of it was
+real.
 
 ---
 
@@ -818,17 +1085,21 @@ services:
  0  5 * * 2   uv run python -m ff_agent.cli monitor --job refresh
  0  8 * * 2   uv run python -m ff_agent.cli monitor --job waivers
  0  8 * * 3   uv run python -m ff_agent.cli monitor --job freeagents
- 0 12 * * 4   uv run python -m ff_agent.cli monitor --job lineup --tnf
  0 10 * * 6   uv run python -m ff_agent.cli monitor --job injuries
- 0  9 * * 0   uv run python -m ff_agent.cli monitor --job lineup
-15 11 * * 0   uv run python -m ff_agent.cli monitor --job inactives     # ★ urgent
  0  9 * * 1   uv run python -m ff_agent.cli monitor --job trades
+# ── the lineup has NO fixed time: F9. tick, and let clock.py decide ──
+*/15 * * * *  uv run python -m ff_agent.cli monitor --job tick
 # ── health ──────────────────────────────────────────────────────────
  0  7 * * *   uv run python -m ff_agent.cli monitor --job heartbeat
 ```
 
-`week14` is not a cron line — `clock.py` fires it from the `waivers` slot when the
-league week is 14, because it *replaces* that job rather than adding to it (§2.2).
+`week14` is not a cron line either — `clock.py` fires it from the `waivers` slot when
+the league week is 14, because it *replaces* that job rather than adding to it (§2.2).
+
+The tick is deliberately dumb and cheap: it reads the cached lock calendar, compares it
+to the clock, and exits in well under a second when nothing is due. Everything that
+knows about Wednesday openers, Christmas Day kickoffs and London games lives in
+`clock.py`, where it is testable, rather than in a crontab, where it is not.
 
 ### `docker/entrypoint.sh`
 
@@ -860,7 +1131,8 @@ uv run python -m ff_agent.cli monitor --job waivers --dry-run   # print, do NOT 
 uv run python -m ff_agent.cli monitor --job preflight --strict  # the entrypoint check
 
 uv run python -m ff_agent.cli waivers        # §9.3 ordered claim list
-uv run python -m ff_agent.cli lineup         # §9.2 start/sit for the current week
+uv run python -m ff_agent.cli lineup         # the sequence: locked / open / next deadline
+uv run python -m ff_agent.cli lineup --at '2026-12-25 12:00'  # replay any decision point
 uv run python -m ff_agent.cli trades         # §9.4 two-sided search, all 8 opponents
 uv run python -m ff_agent.cli week14         # §2.2 free-week churn
 uv run python -m ff_agent.cli audit          # did last week's recommendations pay off?
