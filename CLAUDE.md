@@ -231,7 +231,115 @@ league (`SETUP_ANY_LEAGUE.md`).
   everyone drafts off consensus, stated out loud. M7 measured that arm at
   +29.9 weekly points against the full model's +32.1, so the loss is small.
 
-**Next: M10 (in-season jobs incl. `/week14`).**
+**M10a (post-draft analysis → `postdraft.json`) — ADDED 2026-08-22.** 375 pass, 2 fail.
+All 24 new tests pass; both failures are unrelated to this milestone (see below).
+`uv run python -m ff_agent.cli postdraft` grades every pick, rates every roster,
+and projects the season. It reads this tool's own session log by default and
+ESPN's draft export otherwise (`--source espn`).
+
+- **A pick is graded over a PAIR of picks, not one, and post-hoc that
+  counterfactual is EXACT.** M8's central finding — "Josh Allen has the highest
+  VOR on the board and is the THIRD best choice, because he comes back 97% of
+  the time" — needs the opponent model to guess survival while the draft is
+  live. Afterwards the survivors are *observed*, so the question "which legal
+  pair (a at my pick, b at my next pick) was worth the most" is answered with
+  arithmetic instead of simulation. The one assumption, printed on the output,
+  is that the other managers would have picked the same players regardless.
+- **Scoring those pairs by VOR reproduced M7's four-QB bug from the other
+  side.** The first version handed round one a wall of Ds — Ja'Marr Chase at
+  pick 6 graded F against "Drake Maye + Joe Burrow" — because VOR is measured
+  against the STARTER replacement and prices QB3/QB4 as though they would start.
+  Pairs are now scored with `surrogate.lineup_stats`, the same optimal-lineup
+  solver M7 used, against **each manager's own play weeks**. Measured
+  consequence, pinned as a test: **QB3 realises ~3.8 weekly points against the
+  ~8.6 his VOR implies — about 44% — and what he DOES realise is bye coverage.**
+  That is M8's "§2.1's QB COUNT IS THREE" visible in one line.
+- **Hindsight regret has no meaningful zero, so the letters are a curve and say
+  so.** The better pair is chosen knowing who survived, and on the 2025 draft the
+  MEDIAN pick fell **8-10 weekly points** short of it; absolute thresholds graded
+  four picks in five at D or F, which says nothing about any of them. Letters
+  rank picks **within their own round** — the ratio carries a structural trend
+  (median 0.74 in round 1 climbing to 1.7 by round 15 as the value spread
+  collapses), so a global curve would fail the late rounds for being late.
+  `regret_weekly_points` carries the magnitude beside every letter.
+- **Lifting §3.5's late-K/D-ST guard produced KICKER WORSHIP.** It was removed on
+  the argument that the rule is my discipline and grading a rival against it is
+  unfair (`allowed_positions` says exactly that). What came back was "Texans
+  D/ST + Brandon Aubrey" as the better pair at **nine consecutive picks of
+  mine**: the rank→points curve gives the top kicker a real edge over the
+  twentieth and nothing stopped the counterfactual banking it fifteen rounds
+  early. §3.5 exists because that edge does not survive a season. Restored.
+- **The evidence that motivated lifting it was a TRUNCATED-CORPUS ARTEFACT.**
+  Rounds 15-16 showed inflated regret (median ratio 1.9 and 3.2 against ~1.0
+  elsewhere) — but measured on the 2025 replay log, which stops at **128 of 136
+  picks** and in which **no team ever drafted a defense**. The last rounds were
+  being graded against rosters that structurally could not be finished. On a full
+  draft `allowed_positions`' feasibility branch handles it: three picks left and
+  two owed to K and D/ST still leaves round 15 free.
+- **A mid-draft report is read off PHANTOM HOLES unless the rest is projected.**
+  Team strength is the optimal starting lineup, so a roster that has not reached
+  the kicker yet has an EMPTY kicker slot — and every counterfactual then
+  discovers that the best available action at every pick is to take a kicker.
+  `postdraft/finish.py` projects the remaining picks greedily on **marginal
+  lineup value, never VOR** (padding by VOR would hand every team a quarterback
+  room and no tight end), in real snake order so two managers cannot be given the
+  same player. No-op on a finished draft; roster SHAPE always reports real picks.
+- **§2.5 BIT AGAIN, in the projected finishing order.** Ranking on raw
+  `mean_wins` put a 13-game team above a 12-game team it trailed on every other
+  measure, so the projected order openly contradicted the playoff odds printed
+  beside it. The league seeds on win PERCENTAGE (confirmed 2026-08-20) and now so
+  does this. Five teams play 12 games in 2026 and four play 13, so this is not
+  hypothetical.
+- **polars hands `group_by` the key as a TUPLE.** Keying the schedule join on
+  `('Personality Hires',)` matched nothing, silently, and gave **all nine teams
+  my own bye weeks** — the same failure class as the Rams trap, where a left join
+  fails as a NULL rather than an error. Fixed and asserted: the nine teams' byes
+  must differ, and must sum to exactly one per week.
+- **§1's "R. Sharrett" vs ESPN's "Rayne Sharrett" silently listed 3 of the 4
+  double-up opponents.** M5 already built `canonical_manager` for exactly this;
+  not calling it was the bug. Asserted at 4, and unmatched names are now printed
+  rather than dropped. (Measured for 2026: my four double-up opponents average
+  **118.6** projected weekly points against a league mean of **122.9** — §2.3's
+  2x weighting cuts in my favour this year.)
+- **K and D/ST have a board VOR RANK but no board ADP, and mixing the two made
+  every "biggest reach" a defense.** A top defense lands around overall 35-76 by
+  VOR, while this league takes exactly one each per team, late (26/26 and 27/27).
+  Left in the market-timing lists, the six biggest reaches of the draft were all
+  D/ST taken in rounds 12-17 — with ECR sitting calmly beside them saying the
+  picks were normal. That is two of our own scales disagreeing, not a decision
+  anybody made. Steals and reaches are now skill-positions-only; regret still
+  covers all six positions, because THAT scale is common to them.
+- **Ties in regret must SHARE a grade.** Once the counterfactual got good enough
+  that most picks in a round came back at exactly zero regret, ordinal ranking
+  broke ties on row order and split two identical picks between A+ and C.
+  Rank-averaging over tie groups.
+- **§2.1 generalises to all nine teams and the code already supported it.** Each
+  team has its own fantasy byes (14 bye slots across 9 teams), so bye cost is
+  measured against each manager's own play weeks rather than mine. My free-bye
+  count is a property of my schedule; theirs is a property of theirs.
+- **The standings forecast ships M6's measured ceiling, in the report body.**
+  Preseason projections scored Spearman **-0.21** on this exact task in 2025; a
+  PERFECT simulator scores **+0.52**, perfect player knowledge **+0.43**. The
+  probabilities are the honest output; the finishing order is decoration. A test
+  asserts those three numbers are still printed.
+- §0.1 is asserted here too — `test_postdraft_package_cannot_write_to_espn`
+  scans the package for the same write verbs `ff_agent/live/` is scanned for.
+- **A TEAM WAS RENAMED DURING THE DRAFT, for the third time in this project.**
+  leah gottlieb's "leah's team" became **"Chase-ing Dubs"** minutes after she
+  took Ja'Marr Chase, and `test_league_settings.py::test_my_schedule_matches_the_spec`
+  now fails on it: `team_names_by_manager` has the new spelling while the cached
+  `league_schedule` still has the old one, which is the independent-cache
+  divergence already recorded for "A Chane Reaction" → "TBD". Not caused by M10a
+  and not fixed by it — the post-draft path resolves manager → team_id →
+  the schedule's own spelling and is unaffected — but the settings test is
+  pinned to §1's literal names and wants the same treatment.
+- **Two clock tests fail under CPU load and are not real failures.**
+  `test_advice_fits_the_clock` (1.13s against a 1.0s budget) and
+  `test_full_mock_replays_the_2025_draft_under_the_clock` both fail while the
+  draft GUI is still running at ~39% CPU, and both pass standalone. Verified by
+  removing every M10a change and re-running: the failure is byte-identical.
+
+**Next: M10b (in-season jobs incl. `/week14`).**
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
 must hand over **a concrete shortlist of players to choose from**, not a score or
@@ -302,10 +410,12 @@ uv run python -m ff_agent.cli gui --slot 6     # M9 — the SAME loop in a brows
 uv run python -m ff_agent.cli setup            # ANY league: preflight + build its board
 uv run python -m ff_agent.cli gui --auto           # ANY league: detects slot AND shape
 uv run python -m ff_agent.cli mock             # M9 GATE — replay 2025 live
+uv run python -m ff_agent.cli postdraft        # M10a — grades, ratings, predictions
+uv run python -m ff_agent.cli postdraft --source espn --csv picks.csv
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 297 pass
+uv run pytest                             # 377: 375 pass, 2 unrelated
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`

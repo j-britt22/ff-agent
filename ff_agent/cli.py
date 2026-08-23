@@ -861,6 +861,34 @@ def cmd_mock(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_postdraft(args) -> int:
+    """M10: grade every pick, rate every roster, project the season."""
+    from ff_agent.postdraft import build as PB
+    from ff_agent.postdraft import report as PR
+
+    season = args.season or SEASON
+    pd_ = PB.build(
+        season,
+        source=args.source,
+        log_path=args.log,
+        n_sims=args.sims,
+        predict_season=not args.no_predict,
+        pad_unfinished=not args.no_pad,
+    )
+    print(PR.render(pd_))
+
+    path = PB.write(pd_)
+    print(f"wrote {path}")
+
+    if args.csv:
+        pd_.picks.write_csv(args.csv)
+        print(f"wrote {args.csv}")
+
+    # §10: a roster that cannot field a lineup is an alarm, not a footnote.
+    alarms = sum(len(r["alarms"]) for r in pd_.ratings.to_dicts())
+    return 1 if alarms else 0
+
+
 def cmd_settings(args) -> int:
     from ff_agent.data import espn
 
@@ -975,6 +1003,18 @@ def main(argv=None) -> int:
     p.add_argument("--season", type=int)
     p.add_argument("--no-log", action="store_true")
     p.set_defaults(fn=cmd_mock)
+    p = sub.add_parser("postdraft")
+    p.add_argument("--season", type=int)
+    p.add_argument("--source", choices=("auto", "log", "espn"), default="auto",
+                   help="auto prefers this tool's own session log, then ESPN")
+    p.add_argument("--log", help="a specific draft session .jsonl to read")
+    p.add_argument("--sims", type=int, default=20_000)
+    p.add_argument("--csv", help="also write the graded picks to this CSV")
+    p.add_argument("--no-predict", action="store_true",
+                   help="skip the season simulation")
+    p.add_argument("--no-pad", action="store_true",
+                   help="do not project the remaining picks of an unfinished draft")
+    p.set_defaults(fn=cmd_postdraft)
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)
