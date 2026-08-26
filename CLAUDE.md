@@ -339,7 +339,9 @@ ESPN's draft export otherwise (`--source espn`).
   draft GUI is still running at ~39% CPU, and both pass standalone. Verified by
   removing every M10a change and re-running: the failure is byte-identical.
 
-**M10b (in-season monitor) — DESIGNED 2026-08-23, not yet built.**
+**M10b (in-season monitor) — BUILT 2026-08-23. 547 tests, 170 of them new.**
+All 170 run OFFLINE; the 76 pre-existing failures (missing cache and `.env` in a
+fresh clone) are unchanged before and after.
 Full plan: `docs/M10B_MONITOR_DESIGN.md`. A Docker container on an always-on box runs
 the §9.1 cadence, recomputes ROS value and Δ P(title) with the M2–M7 engines, and
 **emails** an ordered list of actions. §0.1 holds absolutely: it recommends, I click.
@@ -412,7 +414,94 @@ games; and `season/lineup.py` needs slot pinning (above). And a gift: M7 needed 
 P(title) surrogate to score 10,000 rosters; a weekly job scores ~30, so **M10b can
 afford the real simulator**.
 
-**Next: M10b-1 (container, scheduler, notifier, pre-flight) — shippable alone.**
+**What shipped**, `ff_agent/inseason/`: `clock` (the lock calendar) ·
+`value` (roster → Δ P(title), two speeds) · `ros` (the points anchor) ·
+`state` (§0.1/§0.2) · `availability` + `lineup` (the Thursday counterfactual) ·
+`waivers` + `dst` + `kicker` · `trades` + `playoffs` · `notify/` + `digest` +
+`log` + `audit` + `jobs` · `backtest` (the gate). Plus `docker/` and
+`SETUP_MONITOR.md`.
+
+```bash
+uv run python -m ff_agent.cli monitor --job preflight   # entrypoint check
+uv run python -m ff_agent.cli monitor --job tick        # F9's 15-min wake
+uv run python -m ff_agent.cli monitor --job waivers --dry-run
+uv run python -m ff_agent.cli lineup      # the lock calendar for this week
+uv run python -m ff_agent.cli week14 · trades · audit
+docker compose -f docker/compose.yml up -d --build
+```
+
+**Three shipped modules changed, preseason behaviour byte-identical:**
+`season/lineup.py::optimal_lineup(pinned=)`, `season/simulate.py::simulate(completed=)`,
+`season/strength.py::roster_strength(value_col=)`.
+
+**Build findings — things measurement or a test caught, not reasoning:**
+
+- **A sentinel collision made the bye cost equal the WHOLE LINEUP.** `value.py`'s
+  "no bye" marker was the same value as the probe week used to price the bye, so
+  the probe masked out every player. A bye-free roster reported a bye cost of 145
+  instead of 0. Sentinels are now 0 (no bye) and −1 (probe), pinned by a test.
+  §2.1 then falls straight out of the arithmetic with no hand-tuned nudge.
+- **Pinning RB3 into a starting RB slot does NOT cost "RB2 minus RB3".** The
+  naive reading says 3 points; it costs **1**. RB2 keeps his points from the
+  FLEX and what actually falls out is the flex-bound WR3. That is exactly why
+  pinning must run THROUGH the solver rather than be applied afterwards — the
+  cheapest way to absorb a pin is usually to rearrange around it, and only the
+  assignment problem knows that.
+- **F10's positional split FLIPS a real decision.** A Questionable Thursday QB
+  and a Questionable Thursday RB, identical at 18.0 projected points and
+  identical designation, get opposite calls: **BENCH at −11.95 and START at
+  +4.18**, because a Questionable QB sits 0.586 of the time against an RB's
+  0.211. In a 2-QB league that is where it matters. Pinned as a test.
+- **THE INFORMATION EFFECT IS EXACTLY ZERO UNDER EXPECTED POINTS**, and that is a
+  result rather than an omission. The design argued a Thursday player who
+  *starts* reveals my partial score early and sharpens Sunday's posture — true
+  only under a NONLINEAR objective. Under expected points the optimal Sunday
+  lineup does not depend on the Thursday realisation, so the information changes
+  no decision. It is positive only under P(beat this opponent), where the best
+  lineup depends on the margin still needed. `information_value("win_prob")`
+  raises `NotImplementedError` naming what makes it hard (not a greedy
+  best-available problem — it depends on each candidate's VARIANCE, not its
+  mean). Claiming both effects were measured, under an objective that can only
+  see one, would have been a quiet overclaim.
+- **ADD-§F's D/ST trap, made concrete.** Two defences facing opponents with the
+  SAME implied total of 17 points score **3.0 and 8.0** — one faces a methodical
+  413-yard offence (yards bucket −3), the other a three-and-out 267-yard offence
+  (+2). A five-point gap every other league's model scores as a tie, because
+  they project points allowed and §1 pays for YARDS.
+- **§0.1's scan flagged the sentence ASSERTING §0.1.** A substring match on
+  "submit" hit the digest footer ("nothing here has been submitted to ESPN") and
+  a waiver note. This package DESCRIBES the rule in prose that reaches the
+  reader, so the scan now matches CALL syntax exactly as `test_live.py` does.
+- **A dry run must not advance the dedupe state**, or it silently suppresses the
+  next real send. `Notifier.dry_run` separates "the notifier accepted it" from
+  "it went out". And the fingerprint hashes the DECISION, never the rendered
+  text — countdowns change every tick, so hashing the message would defeat
+  §6.4 entirely, which is the difference between one email a week and nine.
+- **Two test fixtures were wrong in ways that inverted headline results.** A
+  roster with exactly ten playable bodies for ten slots made the option value of
+  waiting come out NEGATIVE (waiting meant waiting for nobody), and a trade
+  fixture with no bench found ZERO trades because every "surplus" player was
+  actually a starter. Both zeros were CORRECT for those rosters and neither was
+  the case under test. Fixtures now carry real depth.
+
+**`ros.MODEL_WEIGHT` ships at 0.0.** M3's fitted 0.12 was fitted for preseason
+season-long projections scored on rank correlation; carrying it to an in-season
+points task is the unjustified transfer this project keeps refusing to make.
+M10b-2's walk-forward gate sets it. Shipped instead are the two corrections ESPN
+is STRUCTURALLY unable to contain: the sack term (§3.3, SOE persists at 0.434 —
+it closes a ten-point gap between two QBs to under one point on the test
+fixture) and the kicker 60+ bucket (M3 — ESPN merges 50-59 and 60+; §1 pays 5
+and 6, so the premium is exactly one point per long make).
+
+**The gate is built and does NOT pass, because it has no data yet.** Every arm
+names its control and an unmeasured arm reports UNMEASURED rather than passing
+quietly — a gate that can only pass is not a gate. The controls exist because of
+M7: a policy with zero board edge captured +29.9 weekly points against the full
+model's +32.1, so without one the whole 32 gets banked as skill.
+
+**Next: run the M10b-2/3/4 gates against the real 2025 replay** (needs `.env`
+and a warm cache), then set `MODEL_WEIGHT` and `BETTER_TARGET_PER_WEEK` from
+what they measure.
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
 must hand over **a concrete shortlist of players to choose from**, not a score or
