@@ -386,6 +386,64 @@ recomputing.
 seasons narrowed from 0.05–0.20 to **0.05–0.15** (0.20 now wins 4/5). The shipped
 weight of **0.12** sits inside either version. Recorded in `tests/test_projection_gate.py::PLATEAU`.
 
+**THE DEDUPE ITSELF WAS THE WRONG FIX, AND WAS REPLACED 2026-08-22.** It removed
+the duplicate rows but kept the wrong one. `model.project` sorted by
+`model_points` and took `.unique(keep="first")`, so of a traded player's two
+stints the HIGHER-PROJECTING one survived — and because every opportunity feature
+is a per-game RATE, that was the SHORTER stint for **9 of 2025's 25 traded skill
+players**. Adam Thielen's 5 games in PIT (49.7) beat his 9 in MIN (37.2); Brandin
+Cooks' 4 in BUF beat his 9 in NO; six of the nine kept a one- or two-game
+cameo. Nine seasons were being represented by their smallest sample.
+
+Stints are now **summed** in `opportunity.player_season_features`, which keys on
+player instead of (player, team): counting stats add, rates are recomputed over
+the combined games, and shares average over all his weeks. Two stints genuinely
+ARE two rows of opportunity — the answer was always to add them, never to pick a
+winner. `.unique()` is gone; §0.2 is **asserted** at the root and again at
+`model.project`, so a future fan-out fails instead of being silently absorbed.
+
+- **`games` is deliberately NOT clamped at 17.** A traded player can legitimately
+  log **18** in an 18-week season by missing neither team's bye — Rashid Shaheed
+  did in 2025, 9 with NO and 9 with SEA. `min(games, 17)` would inflate every one
+  of his rates. Pinned by `test_games_are_not_clamped_at_seventeen`.
+- **The two ROLE features had been describing different seasons.** `points` comes
+  from `player_season_actuals`, which never keyed on team, so a traded player
+  always carried a FULL season of points against a PARTIAL `games`. Aggregating
+  fixes a half of §7.2 step 3 nobody had noticed was broken.
+- **THE GATE DOES NOT MOVE, and that is the honest headline.** Re-run
+  walk-forward: still **4/4 seasons**, mean delta **+0.0031** — identical to four
+  decimals, with the per-season deltas moving by ±0.0002 in both directions. The
+  plateau is still exactly **0.05–0.15**; 0.05/0.10/0.15 win 5/5 and 0.20 wins
+  4/5, unchanged. Mean blend at 0.10 went 0.7701 → 0.7699, at 0.15 stayed 0.7701;
+  model-alone 0.6890 → **0.6897**. **0.12 remains inside the plateau.** A fix for
+  25 players is not visible in a rank correlation over ~500 — it was worth making
+  because it is right, not because it scores.
+- **The board barely notices, but the model refits underneath it.** Every
+  coefficient shifts, so **609 of 610** projections change: mean |Δ| **1.19**
+  model points, max **21.97** (Adonai Mitchell). After blending at 0.12 that is
+  mean **0.12** blended points, max **2.63**. Inside the 153-pick draftable range
+  **21 players move rank, by at most 2 places**, and the **top 20 is unchanged**.
+- **A hard threshold ran straight through a feature.** TE `td_rate` measured
+  0.448 before and **0.452** after, against `MIN_STABILITY = 0.45` — so it
+  flipped INTO the TE feature set on four thousandths of correlation. Not free:
+  including it is worth up to **8.7** model points (Tucker Kraft) and reorders the
+  top 20 tight ends, though not which 20 they are. Recorded, not tuned, by
+  `test_te_td_rate_sits_on_the_stability_cutoff`. The TE feature set is the
+  fragile part of this model.
+- Aggregating also **restored** training rows the `min_games >= 6` filter had been
+  discarding — a 4-game and a 5-game stint is a 9-game season. TE training grew
+  590 → 591 even as RB fell 688 → 681 and WR 1120 → 1108.
+- Every ADD-§B headline stability is unchanged to two decimals (WR target share
+  0.802 → 0.808, RB carries/game 0.776 → 0.781, QB sack rate 0.394 → 0.396), so
+  **no M3 or M3b finding needs revising.** The one real mover is RB
+  `air_yards_share`, 0.325 → **0.433** — still under the cutoff, and it fails the
+  `corr_next_ppg` filter anyway at −0.053.
+- **nflverse ships a null-`player_id` placeholder row per week**, zero stats and
+  no position. Per team those were 14–18 obvious junk rows; aggregated per player
+  they collapse into a single phantom with **18 games** that reads like a real
+  player. Dropped explicitly at ingest. (CLAUDE.md already records the same trap
+  in `ff_opportunity`; it is in `player_stats` too.)
+
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
 must hand over **a concrete shortlist of players to choose from**, not a score or
 a strategy note. Build M8's plans so that shortlist falls out of them directly.
@@ -415,7 +473,7 @@ uv run python -m ff_agent.cli postdraft --source espn --csv picks.csv
 uv run python -m ff_agent.cli settings    # refresh league settings JSON
 uv run python -m ff_agent.cli verify      # cookie pre-flight, run draft morning
 uv run python -m ff_agent.cli offline     # prove the draft-day path
-uv run pytest                             # 377: 375 pass, 2 unrelated
+uv run pytest                             # 384 collected; 361 pass, 23 skip on artifacts
 ```
 
 Layout: `ff_agent/config.py` (§1 constants, credentials) · `data/cache.py`

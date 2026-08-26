@@ -49,6 +49,15 @@ team) for players who changed teams, and those fanned out through the blend
 join. Removing them slightly IMPROVED the blend (mean Spearman 0.767 -> 0.770)
 and moved the upper edge of the plateau from 0.20 to 0.15, where 0.20 now wins
 4 of 5. The default weight of 0.12 sits inside either version.
+
+RE-RUN 2026-08-22, after the stints stopped being deduplicated and started being
+SUMMED (opportunity.player_season_features now keys on player, not player+team).
+That changes what the model is fitted on, so it is gated — and the gate does not
+move: walk-forward still 4/4 with mean delta +0.0031, and the plateau is still
+exactly 0.05-0.15 (0.05/0.10/0.15 win 5 of 5, 0.20 wins 4). Mean blend at 0.10
+went 0.7701 -> 0.7699 and at 0.15 stayed 0.7701; model-alone 0.6890 -> 0.6897.
+Correct-in-principle and worth ~0.0002 Spearman: the fix is for the 25 traded
+players a rank correlation over ~500 barely notices.
 """
 
 
