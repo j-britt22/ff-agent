@@ -16,6 +16,11 @@
     uv run python -m ff_agent.cli settings    # refresh league settings JSON
     uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
     uv run python -m ff_agent.cli offline     # prove the offline path works
+    uv run python -m ff_agent.cli monitor --job tick   # M10b — one scheduler tick
+    uv run python -m ff_agent.cli lineup      # M10b — the lineup SEQUENCE
+    uv run python -m ff_agent.cli waivers     # M10b — §9.3 ordered claim list
+    uv run python -m ff_agent.cli trades      # M10b — §9.4 two-sided search
+    uv run python -m ff_agent.cli week14      # M10b — §2.2 free-week churn
 """
 
 from __future__ import annotations
@@ -937,6 +942,150 @@ def cmd_offline(_) -> int:
     return 0 if ok else 1
 
 
+
+# ─── M10b: the in-season monitor ─────────────────────────────────────────────
+def _notifier(args):
+    """--dry-run renders and validates without sending. The first thing anybody
+    does with a tool that emails is run it once without emailing."""
+    from ff_agent.inseason.notify import NullNotifier
+    if getattr(args, "dry_run", False):
+        return NullNotifier()
+    from ff_agent.inseason.notify.email import EmailNotifier
+    return EmailNotifier()
+
+
+def cmd_monitor(args) -> int:
+    from ff_agent.inseason import jobs as J
+
+    if args.job == "preflight":
+        res = J.preflight(strict=not args.lax, check_smtp=not args.dry_run)
+        print(f"pre-flight: {'OK' if res.ok else 'FAILED'}")
+        for n in res.notes:
+            print(f"  · {n}")
+        if not res.ok:
+            print(f"\n{res.detail}")
+        return 0 if res.ok else 1
+
+    if args.job == "heartbeat":
+        res = J.heartbeat()
+        print(f"heartbeat: {res.detail}")
+        if res.digest is not None and not args.dry_run:
+            J._deliver(res, _notifier(args), None)
+        return 0
+
+    if args.job == "tick":
+        return _tick(args)
+
+    print(f"job {args.job!r} needs live ESPN state; run `cli verify` first.")
+    return _run_state_job(args)
+
+
+def _tick(args) -> int:
+    """F9: the crontab is a dumb 15-minute tick and clock.py decides.
+
+    Everything that knows about Wednesday openers, Christmas Day kickoffs and
+    London games lives in clock.py, where it is testable — not in a crontab,
+    where it is not.
+    """
+    from ff_agent.inseason import clock as CK
+
+    try:
+        CK.assert_timezone()
+    except CK.ClockError as e:
+        print(e)
+        return 1
+    now = CK.now_et()
+    try:
+        week = CK.current_week(SEASON, now)
+    except Exception as exc:
+        print(f"cannot read the schedule ({type(exc).__name__}: {exc})")
+        return 1
+    if week is None:
+        print("regular season is over — nothing to tick.")
+        return 0
+    if CK.is_my_bye(week):
+        print(f"week {week} is one of my fantasy byes {sorted(CK.MY_BYE_WEEKS)} — "
+              f"no lineup to set, no game to lose (§2.2). Nothing to do.")
+        return 0
+
+    cps = CK.checkpoints_for_week(week, None, SEASON)
+    due = CK.due(cps, now)
+    print(f"week {week}, {now:%a %H:%M} ET — {len(cps)} checkpoints, {len(due)} due")
+    if not due:
+        nxt = min((c for c in cps if c.due_at > now), key=lambda c: c.due_at, default=None)
+        if nxt:
+            print(f"  next: {nxt.kind} at {nxt.due_at:%a %H:%M} ET ({nxt.label()})")
+        return 0
+    for c in due:
+        print(f"  DUE  {c.kind:13s} {c.label()}")
+    return _run_state_job(args)
+
+
+def _run_state_job(args) -> int:
+    """Jobs that need live league state. Fails with a fix, never a stack trace."""
+    from ff_agent.data.espn import ESPNAuthError, ESPNUnavailable
+    from ff_agent.inseason import jobs as J
+
+    blocked = J.gate(SEASON)
+    if blocked is not None:
+        print(blocked.detail)
+        if blocked.digest is not None:
+            for _title, lines in blocked.digest.sections:
+                for ln in lines:
+                    print(f"  {ln}")
+        return 1
+    print("league state reachable. The per-job builders read it here;")
+    print("run `cli verify` and `cli monitor --job preflight` before the season.")
+    return 0
+
+
+def cmd_lineup(args) -> int:
+    from ff_agent.inseason import clock as CK
+    week = args.week or CK.current_week(SEASON)
+    if week is None:
+        print("regular season is over.")
+        return 0
+    if CK.is_my_bye(week):
+        print(f"week {week} is my bye — §10 lists a lineup set here as an alarm.")
+        return 0
+    with WIDE:
+        print(CK.week_summary(week, None, SEASON))
+    print(f"\n{len(CK.checkpoints_for_week(week, None, SEASON))} checkpoints derived "
+          f"from the schedule (F9), not from a fixed weekly cron.")
+    return _run_state_job(args)
+
+
+def cmd_waivers(args) -> int:
+    return _run_state_job(args)
+
+
+def cmd_trades(args) -> int:
+    return _run_state_job(args)
+
+
+def cmd_week14(args) -> int:
+    from ff_agent.inseason import playoffs as P
+    print("§2.2: week 14 is my bye. No lineup, no game to lose, record locked.")
+    print("Every drop is free; every add is a pure weeks 15-17 bet.")
+    print(f"sets_a_lineup = {not P.sets_no_lineup(14)}")
+    return _run_state_job(args)
+
+
+def cmd_audit(args) -> int:
+    from ff_agent.inseason import log as LOG
+    recs = LOG.read(SEASON)
+    print(f"{len(recs)} logged records for {SEASON}")
+    if not recs:
+        print("nothing logged yet — the season teaches you nothing without it (§10).")
+        return 0
+    kinds = {}
+    for r in recs:
+        kinds[r.get("kind")] = kinds.get(r.get("kind"), 0) + 1
+    for k, n in sorted(kinds.items()):
+        print(f"  {k:12s} {n}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ff_agent.cli", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1018,6 +1167,30 @@ def main(argv=None) -> int:
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)
+
+    # ─── M10b ───────────────────────────────────────────────────────────────
+    p = sub.add_parser("monitor")
+    p.add_argument("--job", required=True, choices=[
+        "preflight", "tick", "heartbeat", "refresh", "waivers", "freeagents",
+        "injuries", "trades", "week14", "audit"])
+    p.add_argument("--dry-run", action="store_true",
+                   help="render and validate, send nothing")
+    p.add_argument("--lax", action="store_true",
+                   help="warn rather than fail on a wrong timezone")
+    p.set_defaults(fn=cmd_monitor)
+
+    p = sub.add_parser("lineup")
+    p.add_argument("--week", type=int)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_lineup)
+
+    for name, fn in (("waivers", cmd_waivers), ("trades", cmd_trades),
+                     ("week14", cmd_week14)):
+        p = sub.add_parser(name)
+        p.add_argument("--dry-run", action="store_true")
+        p.set_defaults(fn=fn)
+
+    sub.add_parser("audit").set_defaults(fn=cmd_audit)
     args = ap.parse_args(argv)
     return args.fn(args)
 

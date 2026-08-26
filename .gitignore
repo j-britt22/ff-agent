@@ -46,6 +46,8 @@ artifacts/*.pdf
 
 # ─── Logs (§10 requires recommendation logs; keep them local) ────────────────
 logs/
+# M10b dedupe + last-success state. Per-machine, like the cache.
+state/
 *.log
 
 # ─── OS / editor ─────────────────────────────────────────────────────────────
