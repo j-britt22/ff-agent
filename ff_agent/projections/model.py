@@ -143,32 +143,26 @@ def project(season: int, models: dict[str, PositionModel] | None = None) -> pl.D
                                     "model_points": pl.Float64, "season": pl.Int64})
     df = pl.concat(out).sort("model_points", descending=True)
 
-    # A player who changed NFL teams mid-season has one row PER TEAM in the
-    # prior-season opportunity table, and every one of them survives to here (25
-    # players for 2026). Left as-is they fan out through blend()'s left join
-    # (1 -> 2) and again through the board's tier join (2 -> 4), so §0.2's
-    # "exactly one canonical ID" quietly fails — by the 2026 board, 15 players
-    # appeared four times each.
+    # §0.2 at the boundary. A player who changed NFL teams mid-season used to
+    # arrive here as one row PER TEAM and fan out through blend()'s left join
+    # (1 -> 2) and again through the board's tier join (2 -> 4) — by the 2026
+    # board, 15 players appeared four times each. That was patched here with a
+    # .unique(keep="first") on a frame sorted by model_points, which kept the
+    # HIGHEST projection. That is not "the fuller stint": for 9 of 2025's 25
+    # traded skill players it was the SHORTER one, because the features are
+    # per-game rates and a brief hot stretch projects high.
     #
-    # Keep the highest projection; the sort above already puts it first. This is
-    # NOT "the fuller stint", which is what an earlier version of this comment
-    # claimed: for 9 of the 25 it is the SHORTER one — Adam Thielen's 5 games in
-    # PIT beat his 9 in MIN — because the model reads per-game rates and a brief
-    # hot stretch projects high. So it is an upside read on a player whose
-    # season split in two, and worth naming as such.
+    # The stints are now SUMMED into one player-season at the root
+    # (opportunity.player_season_features), which is the fix the earlier comment
+    # named and deferred — it changes what the model is fitted on, so it was
+    # gated on re-running M3's walk-forward backtest (still 4/4, plateau still
+    # 0.05-0.15, shipped 0.12 still inside it).
     #
-    # It is small where it counts. Only 15 of the 25 carry an ECR and reach the
-    # board at all, and at the model's 0.12 blend weight the choice is worth at
-    # most 5.3 blended points (Adonai Mitchell, ranked 173). Exactly one lands
-    # inside the 153-pick draftable range — Jakobi Meyers at 127 — and his two
-    # stints project within 0.09 of each other, so for the only player it could
-    # plausibly reach, it does not matter which row wins.
-    #
-    # The principled alternative is to aggregate the stints into one
-    # player-season BEFORE fitting, so a traded player contributes his whole
-    # year. That changes the model's inputs, so it needs M3's walk-forward gate
-    # re-run against it, and is a separate job from stopping the fan-out.
-    return df.unique(subset=["canonical_id"], keep="first", maintain_order=True)
+    # So a duplicate reaching here now means a join fanned out. Fail rather than
+    # drop a row: which row a dedupe keeps is an accident of sort order, and the
+    # answer to two stints was always to add them.
+    O.assert_one_row_per_player(df, "model.project")
+    return df
 
 
 def blend(
