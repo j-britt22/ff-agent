@@ -16,6 +16,11 @@
     uv run python -m ff_agent.cli settings    # refresh league settings JSON
     uv run python -m ff_agent.cli verify      # ESPN cookie pre-flight (draft morning)
     uv run python -m ff_agent.cli offline     # prove the offline path works
+    uv run python -m ff_agent.cli monitor --job tick   # M10b — one scheduler tick
+    uv run python -m ff_agent.cli lineup      # M10b — the lineup SEQUENCE
+    uv run python -m ff_agent.cli waivers     # M10b — §9.3 ordered claim list
+    uv run python -m ff_agent.cli trades      # M10b — §9.4 two-sided search
+    uv run python -m ff_agent.cli week14      # M10b — §2.2 free-week churn
 """
 
 from __future__ import annotations
@@ -937,6 +942,332 @@ def cmd_offline(_) -> int:
     return 0 if ok else 1
 
 
+
+# ─── M10b: the in-season monitor ─────────────────────────────────────────────
+def _notifier(args):
+    """--dry-run renders and validates without sending. The first thing anybody
+    does with a tool that emails is run it once without emailing."""
+    from ff_agent.inseason.notify import NullNotifier
+    if getattr(args, "dry_run", False):
+        return NullNotifier()
+    from ff_agent.inseason.notify.email import EmailNotifier
+    return EmailNotifier()
+
+
+def cmd_monitor(args) -> int:
+    from ff_agent.inseason import jobs as J
+
+    if args.job == "preflight":
+        res = J.preflight(strict=not args.lax, check_smtp=not args.dry_run)
+        print(f"pre-flight: {'OK' if res.ok else 'FAILED'}")
+        for n in res.notes:
+            print(f"  · {n}")
+        if not res.ok:
+            print(f"\n{res.detail}")
+        return 0 if res.ok else 1
+
+    if args.job == "heartbeat":
+        res = J.heartbeat()
+        print(f"heartbeat: {res.detail}")
+        if res.digest is not None and not args.dry_run:
+            J._deliver(res, _notifier(args), None)
+        return 0
+
+    if args.job == "tick":
+        return _tick(args)
+
+    dispatch = {
+        "waivers": cmd_waivers, "trades": cmd_trades, "week14": cmd_week14,
+        "lineup": cmd_lineup, "freeagents": cmd_freeagents,
+        "injuries": cmd_injuries, "refresh": cmd_refresh, "audit": cmd_audit,
+    }
+    if args.job in dispatch:
+        if not hasattr(args, "week"):
+            args.week = None
+        return dispatch[args.job](args)
+    print(f"job {args.job!r} has no builder — this is a bug, not a stub.")
+    return 1
+
+
+def cmd_freeagents(args) -> int:
+    """§9.3's Wednesday sweep: who actually cleared, at zero priority cost."""
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import builders as B
+
+    def build(st, ros):
+        added = None
+        try:
+            txns = ESPN.transactions(SEASON, st.week)
+            if txns.height:
+                added = set(
+                    txns.filter(
+                        pl.col("action").str.contains("ADD", literal=False)
+                        & pl.col("espn_id").is_not_null()
+                    )["espn_id"].to_list()
+                )
+        except Exception:
+            pass
+        return B.freeagents_digest(st, ros, added_ids=added)
+
+    return _run_job(args, "freeagents", build)
+
+
+def cmd_injuries(args) -> int:
+    """§9.1's Saturday job: flag every Q/D with F10's measured rates."""
+    from ff_agent.data import nflverse as NV
+    from ff_agent.inseason import builders as B
+
+    def build(st, ros):
+        try:
+            inj = NV.injuries(SEASON)
+        except Exception:
+            inj = None
+        return B.injuries_digest(st, ros, injuries=inj)
+
+    return _run_job(args, "injuries", build)
+
+
+def cmd_refresh(args) -> int:
+    """Tuesday's ingest plus F2's scoring tripwire. Silent when clean."""
+    from ff_agent.data import espn as ESPN
+    from ff_agent.data import nflverse as NV
+    from ff_agent.data.espn import ESPNAuthError, ESPNUnavailable
+    from ff_agent.inseason import builders as B
+
+    try:
+        ESPN.current_rosters(SEASON, force=True)
+        ESPN.player_projections(SEASON, force=True)
+        ESPN.weekly_results(SEASON, force=True)
+        try:
+            NV.injuries(SEASON, force=True)
+        except Exception as exc:
+            print(f"injury report not refreshed ({type(exc).__name__}) — the "
+                  f"Saturday job will say so rather than assume everyone is fit.")
+    except (ESPNAuthError, ESPNUnavailable) as exc:
+        print(exc)
+        return 1
+    return _run_job(args, "refresh", B.refresh_digest)
+
+
+def _tick(args) -> int:
+    """F9: the crontab is a dumb 15-minute tick and clock.py decides.
+
+    Everything that knows about Wednesday openers, Christmas Day kickoffs and
+    London games lives in clock.py, where it is testable — not in a crontab,
+    where it is not.
+    """
+    from ff_agent.inseason import clock as CK
+
+    try:
+        CK.assert_timezone()
+    except CK.ClockError as e:
+        print(e)
+        return 1
+    now = CK.now_et()
+    try:
+        week = CK.current_week(SEASON, now)
+    except Exception as exc:
+        print(f"cannot read the schedule ({type(exc).__name__}: {exc})")
+        return 1
+    if week is None:
+        print("regular season is over — nothing to tick.")
+        return 0
+    if CK.is_my_bye(week):
+        print(f"week {week} is one of my fantasy byes {sorted(CK.MY_BYE_WEEKS)} — "
+              f"no lineup to set, no game to lose (§2.2). Nothing to do.")
+        return 0
+
+    cps = CK.checkpoints_for_week(week, None, SEASON)
+    due = CK.due(cps, now)
+    print(f"week {week}, {now:%a %H:%M} ET — {len(cps)} checkpoints, {len(due)} due")
+    if not due:
+        nxt = min((c for c in cps if c.due_at > now), key=lambda c: c.due_at, default=None)
+        if nxt:
+            print(f"  next: {nxt.kind} at {nxt.due_at:%a %H:%M} ET ({nxt.label()})")
+        return 0
+    for c in due:
+        print(f"  DUE  {c.kind:13s} {c.label()}")
+    args.week = week
+    # Only the weekly advisory is unconditional; every later checkpoint speaks
+    # solely when the answer moved (§6.4).
+    args.unconditional = any(c.unconditional for c in due)
+    return cmd_lineup(args)
+
+
+def _load_state_and_ros(args, week=None):
+    """The read half every real job shares: league state + ROS numbers.
+
+    Kept in one place because a job that built its own state differently from
+    the others would produce recommendations that quietly disagree.
+    """
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import ros as ROS
+    from ff_agent.inseason import state as ST
+
+    st = ST.load(SEASON, week=week)
+    # The projection table is LONG — one row per (player, week) — so resolution
+    # is asked once per person and joined back, not asked once per row.
+    proj = ST._normalize(ESPN.player_projections(SEASON))
+    resolved, _bad = ST.resolve_long(proj, "projections")
+    from ff_agent.data import byes as BY
+    byes = BY.bye_weeks(SEASON).select("team", pl.col("bye_week").cast(pl.Int64))
+    # §3.3's sack term, live. Dark until a few games exist, and it says so
+    # rather than pricing every quarterback as league-average.
+    soe, soe_note = ROS.live_sacks_over_expected(SEASON)
+    ros = ROS.from_espn(resolved, from_week=st.week, byes=byes, soe=soe,
+                        season=SEASON)
+    notes = list(ros.notes)
+    if soe_note:
+        notes.insert(0, soe_note)
+    return st, ros.frame, notes
+
+
+def _run_job(args, job: str, build, week=None, unconditional=False) -> int:
+    """Build the digest for real, then hand it to the guarded runner."""
+    from ff_agent.data.espn import ESPNAuthError, ESPNUnavailable
+    from ff_agent.inseason import digest as DG
+    from ff_agent.inseason import jobs as J
+    from ff_agent.inseason import state as ST
+
+    try:
+        st, ros, notes = _load_state_and_ros(args, week=week)
+    except (ESPNAuthError, ESPNUnavailable, ST.StateError) as exc:
+        print(exc)
+        return 1
+
+    def _build():
+        d, fp = build(st, ros)
+        d.notes = list(notes) + list(d.notes)
+        return d, fp
+
+    res = J.run(job, _build, notifier=_notifier(args), season=SEASON,
+                week=st.week, unconditional=unconditional)
+    if res.digest is not None:
+        print(DG.to_text(res.digest, None))
+    print(f"\n[{job}] {res.detail}")
+    return 0 if res.ok else 1
+
+
+def cmd_lineup(args) -> int:
+    from ff_agent.inseason import builders as B
+    from ff_agent.inseason import clock as CK
+
+    week = args.week or CK.current_week(SEASON)
+    if week is None:
+        print("regular season is over.")
+        return 0
+    if CK.is_my_bye(week):
+        print(f"week {week} is my bye — §10 lists a lineup set here as an alarm.")
+        return 0
+    with WIDE:
+        print(CK.week_summary(week, None, SEASON))
+    print(f"\n{len(CK.checkpoints_for_week(week, None, SEASON))} checkpoints derived "
+          f"from the schedule (F9), not from a fixed weekly cron.\n")
+
+    def build(st, ros):
+        from ff_agent.data import nflverse as NV
+        try:
+            inj = NV.injuries(SEASON)
+        except Exception:
+            inj = None
+        return B.lineup_digest(st, ros, injuries=inj)
+
+    return _run_job(args, "lineup", build, week=week, unconditional=True)
+
+
+def cmd_waivers(args) -> int:
+    from ff_agent.inseason import builders as B
+    return _run_job(args, "waivers", B.waivers_digest, unconditional=True)
+
+
+def cmd_trades(args) -> int:
+    from ff_agent.inseason import builders as B
+    return _run_job(args, "trades", B.trades_digest)
+
+
+def cmd_week14(args) -> int:
+    """§2.2's free week.
+
+    Loads the CURRENT week's state, not week 14's. Forcing week=14 made the
+    staleness check demand thirteen completed weeks of results — so running it
+    in September refused with "weeks [1..13] have been played but carry no
+    results", which is true of week 14 and false of today. The week-14 FRAMING
+    (no lineup, weeks 15-17 value only) is a property of the job, not of the
+    data it needs to read.
+    """
+    from ff_agent.inseason import builders as B
+    from ff_agent.inseason import clock as CK
+
+    now_week = CK.current_week(SEASON)
+    print("§2.2: week 14 is my bye. No lineup, no game to lose, record locked.")
+    print("Every drop is free; every add is a pure weeks 15-17 bet.")
+    if now_week is not None and now_week != 14:
+        print(f"(previewing from week {now_week} — values are today's, the "
+              f"FRAMING is week 14's)\n")
+    else:
+        print()
+    return _run_job(args, "week14", B.week14_digest, unconditional=True)
+
+
+def cmd_inseason(args) -> int:
+    """M10b's gate — the 2025 replay, against controls."""
+    from ff_agent.inseason import backtest as BT
+
+    if not args.backtest:
+        print("nothing to do; pass --backtest to run the gate.")
+        return 0
+    res = BT.run_live(season=args.season)
+    print(res.report())
+    return 0 if res.passed else 1
+
+
+def cmd_audit(args) -> int:
+    """§11 step 10, run continuously rather than once in January."""
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import audit as AU
+    from ff_agent.inseason import clock as CK
+    from ff_agent.inseason import log as LOG
+
+    recs = LOG.read(SEASON)
+    print(f"{len(recs)} logged records for {SEASON}")
+    if not recs:
+        print("nothing logged yet — the season teaches you nothing without it (§10).")
+        return 0
+    kinds = {}
+    for r in recs:
+        kinds[r.get("kind")] = kinds.get(r.get("kind"), 0) + 1
+    for k, n in sorted(kinds.items()):
+        print(f"  {k:12s} {n}")
+
+    week = args.week or CK.current_week(SEASON) or 1
+    through = max(1, week - 1)
+
+    # The control (F4): the most-added player across the league that week.
+    controls, actuals = {}, {}
+    for wk in range(1, through + 1):
+        try:
+            controls[wk] = AU.most_added(ESPN.transactions(SEASON, wk), wk)
+        except Exception:
+            controls[wk] = None
+        try:
+            box = ESPN.started_lineup(SEASON, wk)
+            actuals[wk] = box.select(
+                pl.col("espn_id").alias("canonical_id"),
+                pl.col("points"))
+        except Exception:
+            pass
+
+    scored = AU.audit_season(SEASON, through, actuals, controls)
+    if scored.height:
+        with WIDE:
+            print()
+            print(scored)
+    print()
+    print(AU.season_verdict(scored))
+    return 0
+
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ff_agent.cli", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1018,6 +1349,38 @@ def main(argv=None) -> int:
     p = sub.add_parser("settings"); p.add_argument("--season", type=int); p.set_defaults(fn=cmd_settings)
     sub.add_parser("verify").set_defaults(fn=cmd_verify)
     sub.add_parser("offline").set_defaults(fn=cmd_offline)
+
+    # ─── M10b ───────────────────────────────────────────────────────────────
+    p = sub.add_parser("monitor")
+    p.add_argument("--job", required=True, choices=[
+        "preflight", "tick", "heartbeat", "refresh", "waivers", "freeagents",
+        "injuries", "lineup", "trades", "week14", "audit"])
+    p.add_argument("--dry-run", action="store_true",
+                   help="render and validate, send nothing")
+    p.add_argument("--lax", action="store_true",
+                   help="warn rather than fail on a wrong timezone")
+    p.set_defaults(fn=cmd_monitor)
+
+    p = sub.add_parser("lineup")
+    p.add_argument("--week", type=int)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_lineup)
+
+    for name, fn in (("waivers", cmd_waivers), ("trades", cmd_trades),
+                     ("week14", cmd_week14), ("freeagents", cmd_freeagents),
+                     ("injuries", cmd_injuries), ("refresh", cmd_refresh)):
+        p = sub.add_parser(name)
+        p.add_argument("--dry-run", action="store_true")
+        p.set_defaults(fn=fn)
+
+    p = sub.add_parser("audit")
+    p.add_argument("--week", type=int)
+    p.set_defaults(fn=cmd_audit)
+
+    p = sub.add_parser("inseason")
+    p.add_argument("--backtest", action="store_true")
+    p.add_argument("--season", type=int, default=2025)
+    p.set_defaults(fn=cmd_inseason)
     args = ap.parse_args(argv)
     return args.fn(args)
 

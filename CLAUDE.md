@@ -339,7 +339,213 @@ ESPN's draft export otherwise (`--source espn`).
   draft GUI is still running at ~39% CPU, and both pass standalone. Verified by
   removing every M10a change and re-running: the failure is byte-identical.
 
-**Next: M10b (in-season jobs incl. `/week14`).**
+**M10b (in-season monitor) — BUILT 2026-08-23. 547 tests, 170 of them new.**
+All 170 run OFFLINE; the 76 pre-existing failures (missing cache and `.env` in a
+fresh clone) are unchanged before and after.
+Full plan: `docs/M10B_MONITOR_DESIGN.md`. A Docker container on an always-on box runs
+the §9.1 cadence, recomputes ROS value and Δ P(title) with the M2–M7 engines, and
+**emails** an ordered list of actions. §0.1 holds absolutely: it recommends, I click.
+Settled: home box + Docker Compose + supercronic · **email only** · deterministic core
+with a narrow Claude layer for news and prose · `TZ=America/New_York`, asserted.
+
+Four reconnaissance findings shape it, all measured 2026-08-23:
+
+- **THERE IS NO FORMAT-MATCHED REST-OF-SEASON CONSENSUS.** `rsf` — the superflex list
+  M3 shipped on — is scraped **preseason only**: one snapshot at 2025-09-05, then
+  nothing until the next August. In-season the weekly-updating lists are
+  `do dp drk dsf ro rp wo wp wsf`. Only `wsf` is superflex-and-redraft, and it is
+  **this week only**. `ro`/`rp` are rest-of-season but **1-QB**: on 2025-10-31 `ro`'s
+  top 24 held **zero** QBs against `wsf`'s **13**, and `ro`'s overall #1 was a
+  linebacker (the page ships IDP-polluted). M5 already recorded the consequence of
+  ignoring format — "format difference posing as personality" — and here it would
+  manufacture fake waiver value at QB, exactly where §9.3 says to spend priority.
+  **Resolution: anchor ROS on POINTS, not RANKS.** ESPN's per-week projected points are
+  already in §1 scoring and points carry no format; `wsf` serves the weekly jobs, where
+  it is exactly right; `rp` is a non-QB cross-check only.
+- **The historical FA pool IS reconstructible, so the §11 step 10 gate is possible.**
+  `League.load_roster_week(week)` hits `mRoster` with `scoringPeriodId`;
+  `League.transactions(scoring_period, types={FREEAGENT, WAIVER, WAIVER_ERROR})` gives
+  adds, drops and **failed claims**; `League.box_scores(week)` gives `slot_position`,
+  i.e. what was actually STARTED. `WAIVER_ERROR` is the only observed counterfactual in
+  the league and is what calibrates §9.3's P(claim succeeds).
+- **`player_owned_espn` is null in-season** (0 of 6,038 `wsf` rows from Oct 2025), so
+  the obvious "trending adds" control is rebuilt from the transaction log instead —
+  "most-added player across the league that week", which is what the other eight
+  managers actually did rather than a proxy for it.
+- **ESPN carries per-week `projected_points` AND `points_breakdown`** (per-rule applied
+  points — M2's Layer A object). So the M2 gate becomes a **weekly tripwire**: this
+  league already changed its scoring once, after 2024.
+
+- **THE LINEUP DOES NOT LOCK ALL AT ONCE, and the lock calendar is not weekly-periodic.**
+  ESPN locks each player at HIS OWN kickoff, so "set the lineup" is a sequence of
+  irreversible per-slot commitments under increasing information. Measured on the real
+  2026 schedule: **week 1 opens on a WEDNESDAY** (9/9 20:20, with Thursday at 20:35 not
+  20:15); **week 16 — my semifinal — has three Christmas Day games** (12/25 at 13:00,
+  16:30, 20:15); **week 15 has two Saturday games** (17:00, 20:20); Sunday's late slate
+  is TWO windows (16:05 and 16:25); and 2025 week 4 had a **Sunday 09:30 London kick**.
+  Six to nine distinct lock times a week, worst in the fantasy playoffs. §9.1's four
+  fixed slots would miss the Wednesday opener, all three Christmas games, and the whole
+  Sunday late slate. **Resolution: derive checkpoints from the schedule, never the
+  clock** — the crontab becomes a 15-minute tick and `clock.py` fires at kickoff −24h,
+  −3h and **−75min** (inactives drop at −90). Consequence: `season/lineup.py::optimal_lineup`
+  needs `pinned={canonical_id: slot}`, since once Thursday locks the rest must be solved
+  AROUND a fixed partial assignment. And the Thursday call is not "who is better" — it is
+  `E[p] > E[best Sunday alternative chosen under SUNDAY information]`, a strictly higher
+  bar, decided by M9's force-and-simulate pattern. Two effects partly cancel and BOTH get
+  measured: locking forfeits the option on that slot, but a Thursday player who *starts*
+  reveals my partial score three days early and sharpens Sunday's floor/ceiling posture —
+  benching him preserves nothing, since he is locked out either way.
+- **AVAILABILITY BY DESIGNATION, and the QB asymmetry is large.** nflverse `injuries`
+  keys on **`gsis_id`** — joins straight to canonical, no crosswalk hop. 2025 REG, skill
+  positions, P(did not play | Friday designation): Questionable **0.418**, Doubtful and
+  Out 1.000, and *no designation* **0.149**, which is the size of the measurement bias
+  (the proxy is absence from the weekly stats table, which conflates inactive with
+  "dressed and recorded nothing"). Two sub-findings: **a Questionable QB is 0.735 against
+  a Questionable RB's 0.360** — roughly double, and in a 2-QB league that is where it
+  matters; and **full practice participation does NOT separate from limited** (0.421 vs
+  0.404), which is the opposite of the folk rule a hand-written heuristic would encode.
+  Redo against snap counts over 2016-2025 in M10b-4; recorded now because the positional
+  asymmetry survives any plausible bias correction and the Thursday decision turns on it.
+
+Two shipped modules need changes: `season/simulate.py` must accept completed results
+(it re-simulates all 14 weeks, which is wrong from week 2 on), and
+`season/strength.py::roster_strength` hardcodes `/17` where in-season needs remaining
+games; and `season/lineup.py` needs slot pinning (above). And a gift: M7 needed the
+P(title) surrogate to score 10,000 rosters; a weekly job scores ~30, so **M10b can
+afford the real simulator**.
+
+**What shipped**, `ff_agent/inseason/`: `clock` (the lock calendar) ·
+`value` (roster → Δ P(title), two speeds) · `ros` (the points anchor) ·
+`state` (§0.1/§0.2) · `availability` + `lineup` (the Thursday counterfactual) ·
+`waivers` + `dst` + `kicker` · `trades` + `playoffs` · `notify/` + `digest` +
+`log` + `audit` + `jobs` · `backtest` (the gate). Plus `docker/` and
+`SETUP_MONITOR.md`.
+
+```bash
+uv run python -m ff_agent.cli monitor --job preflight   # entrypoint check
+uv run python -m ff_agent.cli monitor --job tick        # F9's 15-min wake
+uv run python -m ff_agent.cli monitor --job waivers --dry-run
+uv run python -m ff_agent.cli lineup      # the lock calendar for this week
+uv run python -m ff_agent.cli week14 · trades · audit
+docker compose -f docker/compose.yml up -d --build
+```
+
+**Three shipped modules changed, preseason behaviour byte-identical:**
+`season/lineup.py::optimal_lineup(pinned=)`, `season/simulate.py::simulate(completed=)`,
+`season/strength.py::roster_strength(value_col=)`.
+
+**Build findings — things measurement or a test caught, not reasoning:**
+
+- **A sentinel collision made the bye cost equal the WHOLE LINEUP.** `value.py`'s
+  "no bye" marker was the same value as the probe week used to price the bye, so
+  the probe masked out every player. A bye-free roster reported a bye cost of 145
+  instead of 0. Sentinels are now 0 (no bye) and −1 (probe), pinned by a test.
+  §2.1 then falls straight out of the arithmetic with no hand-tuned nudge.
+- **Pinning RB3 into a starting RB slot does NOT cost "RB2 minus RB3".** The
+  naive reading says 3 points; it costs **1**. RB2 keeps his points from the
+  FLEX and what actually falls out is the flex-bound WR3. That is exactly why
+  pinning must run THROUGH the solver rather than be applied afterwards — the
+  cheapest way to absorb a pin is usually to rearrange around it, and only the
+  assignment problem knows that.
+- **F10's positional split FLIPS a real decision.** A Questionable Thursday QB
+  and a Questionable Thursday RB, identical at 18.0 projected points and
+  identical designation, get opposite calls: **BENCH at −11.95 and START at
+  +4.18**, because a Questionable QB sits 0.586 of the time against an RB's
+  0.211. In a 2-QB league that is where it matters. Pinned as a test.
+- **THE INFORMATION EFFECT IS EXACTLY ZERO UNDER EXPECTED POINTS**, and that is a
+  result rather than an omission. The design argued a Thursday player who
+  *starts* reveals my partial score early and sharpens Sunday's posture — true
+  only under a NONLINEAR objective. Under expected points the optimal Sunday
+  lineup does not depend on the Thursday realisation, so the information changes
+  no decision. It is positive only under P(beat this opponent), where the best
+  lineup depends on the margin still needed. `information_value("win_prob")`
+  raises `NotImplementedError` naming what makes it hard (not a greedy
+  best-available problem — it depends on each candidate's VARIANCE, not its
+  mean). Claiming both effects were measured, under an objective that can only
+  see one, would have been a quiet overclaim.
+- **ADD-§F's D/ST trap, made concrete.** Two defences facing opponents with the
+  SAME implied total of 17 points score **3.0 and 8.0** — one faces a methodical
+  413-yard offence (yards bucket −3), the other a three-and-out 267-yard offence
+  (+2). A five-point gap every other league's model scores as a tie, because
+  they project points allowed and §1 pays for YARDS.
+- **§0.1's scan flagged the sentence ASSERTING §0.1.** A substring match on
+  "submit" hit the digest footer ("nothing here has been submitted to ESPN") and
+  a waiver note. This package DESCRIBES the rule in prose that reaches the
+  reader, so the scan now matches CALL syntax exactly as `test_live.py` does.
+- **A dry run must not advance the dedupe state**, or it silently suppresses the
+  next real send. `Notifier.dry_run` separates "the notifier accepted it" from
+  "it went out". And the fingerprint hashes the DECISION, never the rendered
+  text — countdowns change every tick, so hashing the message would defeat
+  §6.4 entirely, which is the difference between one email a week and nine.
+- **Two test fixtures were wrong in ways that inverted headline results.** A
+  roster with exactly ten playable bodies for ten slots made the option value of
+  waiting come out NEGATIVE (waiting meant waiting for nobody), and a trade
+  fixture with no bench found ZERO trades because every "surplus" player was
+  actually a starter. Both zeros were CORRECT for those rosters and neither was
+  the case under test. Fixtures now carry real depth.
+- **ESPN PUBLISHES A MEDIAN OF ONE OF FOURTEEN WEEKS, so the rest-of-season
+  anchor cannot be built from the published weeks at all.** Measured on the live
+  league 2026-08-27. Two versions failed on this in opposite directions and both
+  reached the digest. Summing the window and treating unpublished weeks as zero
+  made everyone a fraction of himself, unevenly. Taking the MEAN of the
+  published weeks and extending it fixed the scale and not the substance: a
+  one-week mean is a WEEKLY projection wearing a season's clothes, carrying that
+  week's opponent, snap projection and injury designation, then multiplying all
+  three by fourteen. **Brian Thomas Jr., whom ESPN projected at 0.0 for week 1
+  because he was out, became worth zero for the SEASON** — and therefore the
+  cheapest thing on the roster, so the engine recommended dropping him for a
+  kicker. Resolution: ESPN answers the rest-of-season question DIRECTLY at
+  `scoringPeriodId 0` — a full-season projected total in this league's scoring —
+  and that is the anchor. This is F1's own resolution one level down: match the
+  source to the HORIZON of the question rather than stretching one to cover the
+  other. The per-week numbers are kept as `espn_projection` and serve the weekly
+  lineup call, where they are exactly right. BTJ now prices at 12.4/wk for the
+  season and 0.0 for week 1 — **sit him and do not drop him are opposite calls
+  and the engine has to make both at once.** Rescued players are named in the
+  digest rather than silently corrected.
+- **The season projection is divided by 17 GAMES, never by the 14-week fantasy
+  window.** M7 paid 6.25% for `/16` on the opposite reasoning; `/14` here would
+  inflate every player by 21%. In-season, what is LEFT is `season_projected -
+  season_actual`, which is correct preseason (actual is 0) and in week 9 without
+  a special case — otherwise a player who started hot is projected to score his
+  whole season a second time.
+- **M3's "read literally, every projection is 17x wrong" trap now has a
+  tripwire in its new home.** ESPN ships `appliedAverage` beside `appliedTotal`,
+  so the two readings are compared directly every run: if the season total were
+  secretly a per-game number the ratio would sit near 17 rather than 1. The
+  digest says so loudly instead of pricing a roster on it.
+- **`espn_api`'s `projected_total_points` cannot be used for this.** It is
+  `stats.get(0, {}).get('projected_points', 0)`, so a player ESPN has not
+  projected at all and a player projected at zero both arrive as `0.0`. The
+  whole anchor turns on telling those apart, so `stats[0]` is read directly.
+- **A cache written before the season columns existed is INCOMPLETE, not stale,
+  and the TTL cannot see it.** Serving it would silently fall back to the
+  one-week extrapolation. `player_projections` refetches once when the columns
+  are absent, and refuses offline with the command to run.
+- **A fixture that is not internally consistent measures the fixture.** The
+  wiring fixture sat at week 9 with `season_actual_points = 0.0` beside a
+  17-game projection — "projected for 17 games, scored nothing in 8" — and the
+  anchor correctly answered that all 187 points were still to come, at nearly
+  double the rate. Two tests failed for the right reason.
+
+**`ros.MODEL_WEIGHT` ships at 0.0.** M3's fitted 0.12 was fitted for preseason
+season-long projections scored on rank correlation; carrying it to an in-season
+points task is the unjustified transfer this project keeps refusing to make.
+M10b-2's walk-forward gate sets it. Shipped instead are the two corrections ESPN
+is STRUCTURALLY unable to contain: the sack term (§3.3, SOE persists at 0.434 —
+it closes a ten-point gap between two QBs to under one point on the test
+fixture) and the kicker 60+ bucket (M3 — ESPN merges 50-59 and 60+; §1 pays 5
+and 6, so the premium is exactly one point per long make).
+
+**The gate is built and does NOT pass, because it has no data yet.** Every arm
+names its control and an unmeasured arm reports UNMEASURED rather than passing
+quietly — a gate that can only pass is not a gate. The controls exist because of
+M7: a policy with zero board edge captured +29.9 weekly points against the full
+model's +32.1, so without one the whole 32 gets banked as skill.
+
+**Next: run the M10b-2/3/4 gates against the real 2025 replay** (needs `.env`
+and a warm cache), then set `MODEL_WEIGHT` and `BETTER_TARGET_PER_WEEK` from
+what they measure.
 
 **M9 design constraint, stated by the human 2026-08-21:** the live draft agent
 must hand over **a concrete shortlist of players to choose from**, not a score or

@@ -50,6 +50,13 @@ class SimResult:
     p_title: np.ndarray
     mean_wins: np.ndarray
     mean_points: np.ndarray
+    completed_weeks: tuple[int, ...] = ()
+    """Regular-season weeks fed in as PLAYED. Empty means a preseason forecast.
+
+    Carried on the result because every in-season probability needs it stated
+    beside it: "18% to win it all" means something different with two weeks
+    played than with ten, and the digest says which.
+    """
 
     def table(self) -> pl.DataFrame:
         return pl.DataFrame({
@@ -91,6 +98,72 @@ def _bracket(seed_order: np.ndarray, scores_playoff: np.ndarray) -> np.ndarray:
     return champ
 
 
+COMPLETED_COLUMNS = ("week", "team", "points")
+
+
+def _apply_completed(
+    completed: pl.DataFrame,
+    scores,
+    weeks: list[int],
+    idx: dict[str, int],
+    season: int,
+) -> set[int]:
+    """Replace simulated scores with actual ones for weeks already played.
+
+    Fails loudly rather than quietly ignoring a row it cannot place. A silently
+    dropped result is a team carrying a simulated week it actually lost, which
+    is exactly the "week-3 data in week 8" failure §10 is about — except worse,
+    because it looks like a forecast.
+    """
+    missing = [c for c in COMPLETED_COLUMNS if c not in completed.columns]
+    if missing:
+        raise ValueError(
+            f"completed is missing {missing}; needs {list(COMPLETED_COLUMNS)}."
+        )
+
+    dupes = completed.group_by("week", "team").len().filter(pl.col("len") > 1)
+    if dupes.height:
+        raise ValueError(
+            f"completed has {dupes.height} duplicate (week, team) row(s) — "
+            f"e.g. {dupes.head(3).to_dicts()}. One score per team per week."
+        )
+
+    unknown = sorted(set(completed["team"].to_list()) - set(idx))
+    if unknown:
+        raise ValueError(
+            f"completed names teams the simulation does not know: {unknown}.\n"
+            f"  Known: {sorted(idx)}\n"
+            f"  Team names are mutable in ESPN — resolve through team_id, not "
+            f"the name (see data/espn.py::team_names_by_manager)."
+        )
+
+    off_schedule = sorted(set(completed["week"].to_list()) - set(weeks))
+    if off_schedule:
+        raise ValueError(
+            f"completed has weeks outside the {season} regular season: "
+            f"{off_schedule}. Schedule covers {weeks[0]}-{weeks[-1]}."
+        )
+
+    completed_weeks = set()
+    # Every team in a completed week starts at zero, so a bye contributes
+    # nothing rather than a leftover random draw.
+    for wk in sorted(set(completed["week"].to_list())):
+        scores[:, weeks.index(wk), :] = 0.0
+        completed_weeks.add(int(wk))
+
+    for row in completed.iter_rows(named=True):
+        wi = weeks.index(row["week"])
+        pts = row["points"]
+        if pts is None:
+            raise ValueError(
+                f"completed has a null score for {row['team']!r} in week "
+                f"{row['week']}. A played week with no score is not a result."
+            )
+        scores[:, wi, idx[row["team"]]] = float(pts)
+
+    return completed_weeks
+
+
 def simulate(
     team_means: dict[str, float],
     team_sds: dict[str, float] | None = None,
@@ -99,6 +172,7 @@ def simulate(
     seeding_rule: str = SEEDING_RULE,
     seed: int = 7,
     team_mean_sds: dict[str, float] | None = None,
+    completed: pl.DataFrame | None = None,
 ) -> SimResult:
     """Run the season ``n_sims`` times and return seeding/title probabilities.
 
@@ -110,12 +184,27 @@ def simulate(
     The distinction matters because correlated error moves standings far more
     than independent noise of the same size — being wrong about a player is
     being wrong in all fourteen weeks. Omit it and behaviour is unchanged.
+
+    ``completed`` (M10b) carries weeks that have already been PLAYED, as
+    ``[week, team, points]``. Those weeks stop being random: the actual score
+    replaces the draw in every simulation, so their results are identical across
+    sims and only the remaining schedule is uncertain. Without this the function
+    answers a preseason question — a week-9 title probability that re-simulates
+    weeks 1 through 8 is not a forecast of this season, it is a forecast of a
+    different one. Omit it and behaviour is unchanged, byte for byte.
     """
     if seeding_rule not in SEEDING_RULES:
         raise ValueError(f"seeding_rule must be one of {SEEDING_RULES}")
 
     sched = SCH.league_schedule(season)
     teams = sorted(team_means)
+    if len(teams) < PLAYOFF_TEAMS:
+        raise ValueError(
+            f"{len(teams)} team(s) given but the bracket seats {PLAYOFF_TEAMS}. "
+            f"Refusing to index past the end of the league — the alternative is "
+            f"an IndexError from inside numpy, which is the stack trace §10 says "
+            f"not to hand a human."
+        )
     idx = {t: i for i, t in enumerate(teams)}
     n = len(teams)
     weeks = sorted(sched["week"].unique().to_list())
@@ -137,6 +226,13 @@ def simulate(
         msd = np.array([team_mean_sds[t] for t in teams], dtype=float)
         offset = rng.normal(0.0, np.maximum(msd, 1e-9), size=(n_sims, n))[:, None, :]
     scores = (rng.normal(mu, sd, size=(n_sims, n_weeks, n)) + offset).clip(min=0.0)
+
+    # A week that has been played is not a random variable. Overwriting the draw
+    # (rather than simulating fewer weeks) keeps the array shape, so byes, the
+    # bracket and the points-for tiebreaker all keep working unchanged.
+    completed_weeks: set[int] = set()
+    if completed is not None and completed.height:
+        completed_weeks = _apply_completed(completed, scores, weeks, idx, season)
 
     games = SCH.matchups(season)
     wins = np.zeros((n_sims, n), dtype=np.int32)
@@ -167,7 +263,9 @@ def simulate(
     made[rows, order[:, :PLAYOFF_TEAMS]] = True
     top2[rows, order[:, :FIRST_ROUND_BYES]] = True
 
-    # the same season-long mean error carries into the bracket
+    # The bracket is always simulated: weeks 15-17 are never in ``completed``,
+    # which only ever carries REGULAR-season results (asserted above against the
+    # schedule). The same season-long mean error carries into it.
     playoff_scores = (rng.normal(mu, sd, size=(n_sims, 3, n)) + offset).clip(min=0.0)
     champ = _bracket(order[:, :PLAYOFF_TEAMS], playoff_scores)
     title = np.zeros((n_sims, n), dtype=bool)
@@ -178,6 +276,7 @@ def simulate(
         p_playoffs=made.mean(axis=0), p_top2=top2.mean(axis=0),
         p_title=title.mean(axis=0), mean_wins=wins.mean(axis=0),
         mean_points=points.mean(axis=0),
+        completed_weeks=tuple(sorted(completed_weeks)),
     )
 
 
