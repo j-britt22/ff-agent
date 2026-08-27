@@ -1,7 +1,18 @@
 """SMTP. The only backend shipped (§1's Channel decision).
 
-Configuration is environment-only and never touches ``.env``'s ESPN block, so a
+Configuration lives in ``.env.notify``, never in ``.env``'s ESPN block, so a
 leaked mail password cannot also be a leaked league login.
+
+**This file has to load its own env file.** ``ff_agent/config.py`` loads ``.env``
+on first use (``_ensure_env``), but that loader only ever reads ``.env`` — it has
+no reason to know ``.env.notify`` exists, and mixing the two back together would
+undo the whole point of keeping them apart. Docker Compose's ``env_file:``
+directive populates the container's environment before Python ever runs, which
+made this invisible in the one place it was tested. Running the CLI directly
+(``uv run python -m ff_agent.cli monitor ...``, which is also the fastest way to
+test any of this before standing up the container) has no Compose in the loop,
+so without this loader ``.env.notify`` sits on disk, fully filled in, and does
+nothing.
 """
 
 from __future__ import annotations
@@ -11,9 +22,23 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 
+from dotenv import load_dotenv
+
+from ff_agent.config import ROOT
 from ff_agent.inseason.notify.base import Digest, Notifier, SendResult
 
 REQUIRED = ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "DIGEST_TO")
+
+_ENV_LOADED = False
+
+
+def _ensure_env() -> None:
+    """Load ``.env.notify`` once. Mirrors ``ff_agent.config._ensure_env`` exactly,
+    against the other file, on purpose — one mechanism, two separate files."""
+    global _ENV_LOADED
+    if not _ENV_LOADED:
+        load_dotenv(ROOT / ".env.notify")
+        _ENV_LOADED = True
 
 
 class EmailConfigError(RuntimeError):
@@ -21,6 +46,7 @@ class EmailConfigError(RuntimeError):
 
 
 def config() -> dict[str, str]:
+    _ensure_env()
     vals = {k: (os.environ.get(k) or "").strip() for k in REQUIRED}
     missing = [k for k, v in vals.items() if not v]
     if missing:
@@ -31,7 +57,12 @@ def config() -> dict[str, str]:
             "  Keep them out of the ESPN .env so one leak is not two."
         )
     vals["SMTP_PORT"] = os.environ.get("SMTP_PORT", "587").strip()
-    vals["DIGEST_FROM"] = os.environ.get("DIGEST_FROM", vals["SMTP_USER"]).strip()
+    # ``.get(key, default)`` only falls back when the key is ABSENT — but the
+    # example file ships "DIGEST_FROM=" (blank, marked optional), and dotenv
+    # sets a blank line to "" rather than leaving it unset. So a literal copy of
+    # the template sent mail with an empty From: header until this was written
+    # as `or`, which treats blank the same as absent.
+    vals["DIGEST_FROM"] = (os.environ.get("DIGEST_FROM") or vals["SMTP_USER"]).strip()
     return vals
 
 

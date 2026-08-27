@@ -267,3 +267,82 @@ def test_the_deadman_fires_when_nothing_has_succeeded(monkeypatch):
     assert not res.ok
     assert any("has not succeeded" in a for _t, lines in res.digest.sections
                for a in lines)
+
+
+# ─── email config actually loads .env.notify ────────────────────────────────
+# Found live: a user filled in .env.notify exactly per the template and
+# `monitor --job preflight` still reported it unconfigured. ESPN's `.env` is
+# loaded by ff_agent.config on first use; nothing did the same for
+# .env.notify outside of Docker Compose, where `env_file:` does it invisibly.
+# Running the CLI directly — the fastest way to test any of this before the
+# container exists — has no Compose in the loop, so the file sat on disk,
+# fully filled in, and did nothing.
+def test_config_loads_env_notify_from_disk(tmp_path, monkeypatch):
+    """The bug, reproduced without touching the real .env.notify or its loaded
+    state: a fresh process reading a filled-in file must see the values."""
+    import ff_agent.inseason.notify.email as E
+
+    envfile = tmp_path / ".env.notify"
+    envfile.write_text(
+        "SMTP_HOST=smtp.gmail.com\nSMTP_USER=me@example.com\n"
+        "SMTP_PASSWORD=abcd efgh ijkl mnop\nDIGEST_TO=me@example.com\n"
+    )
+    monkeypatch.setattr(E, "ROOT", tmp_path)
+    monkeypatch.setattr(E, "_ENV_LOADED", False)
+    for k in E.REQUIRED + ("SMTP_PORT", "DIGEST_FROM"):
+        monkeypatch.delenv(k, raising=False)
+
+    cfg = E.config()
+    assert cfg["SMTP_HOST"] == "smtp.gmail.com"
+    assert cfg["SMTP_PASSWORD"] == "abcd efgh ijkl mnop"
+
+
+def test_config_raises_its_normal_error_when_the_file_is_genuinely_absent(
+    tmp_path, monkeypatch
+):
+    """The loader must not swallow a real misconfiguration — no file, no env
+    vars, still the same actionable EmailConfigError."""
+    import ff_agent.inseason.notify.email as E
+
+    monkeypatch.setattr(E, "ROOT", tmp_path)         # no .env.notify here
+    monkeypatch.setattr(E, "_ENV_LOADED", False)
+    for k in E.REQUIRED + ("SMTP_PORT", "DIGEST_FROM"):
+        monkeypatch.delenv(k, raising=False)
+
+    with pytest.raises(E.EmailConfigError, match="SMTP_HOST"):
+        E.config()
+
+
+def test_a_blank_digest_from_falls_back_to_smtp_user(tmp_path, monkeypatch):
+    """`DIGEST_FROM=` with nothing after the `=` — exactly what the shipped
+    template shows for this optional field — must not send mail with an empty
+    From: header.
+
+    dotenv sets a blank line to the empty string rather than leaving the key
+    unset, so `os.environ.get("DIGEST_FROM", fallback)` returns "" instead of
+    the fallback: the key IS present, just empty. `or` treats blank the same as
+    absent; `.get(..., default)` does not.
+    """
+    import ff_agent.inseason.notify.email as E
+
+    envfile = tmp_path / ".env.notify"
+    envfile.write_text(
+        "SMTP_HOST=smtp.gmail.com\nSMTP_USER=me@example.com\n"
+        "SMTP_PASSWORD=abcd efgh ijkl mnop\nDIGEST_TO=me@example.com\n"
+        "DIGEST_FROM=\n"
+    )
+    monkeypatch.setattr(E, "ROOT", tmp_path)
+    monkeypatch.setattr(E, "_ENV_LOADED", False)
+    for k in E.REQUIRED + ("SMTP_PORT", "DIGEST_FROM"):
+        monkeypatch.delenv(k, raising=False)
+
+    assert E.config()["DIGEST_FROM"] == "me@example.com"
+
+
+def test_env_notify_never_shares_a_key_with_espn_credentials():
+    """The whole point of the separate file: one leak must not be two. Loading
+    .env.notify must never populate an ESPN credential name."""
+    import ff_agent.inseason.notify.email as E
+
+    espn_keys = {"ESPN_LEAGUE_ID", "ESPN_S2", "ESPN_SWID"}
+    assert espn_keys.isdisjoint(E.REQUIRED)
