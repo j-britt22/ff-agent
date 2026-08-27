@@ -209,6 +209,12 @@ def candidate_pairs(
         add_row = pl.DataFrame([add]).select(my_roster.columns)
 
         drops = ST.droppable(my_roster, position_of_add=pos)
+        # Never cut somebody we have no number for. An unpriced player reads as
+        # zero and would otherwise always be the "cheapest" thing to drop —
+        # which is exactly backwards, since not knowing his value is a reason
+        # for caution, not a licence.
+        if "priced" in drops.columns:
+            drops = drops.filter(pl.col("priced").fill_null(False))
         for drop in drops.iter_rows(named=True):
             after_counts = dict(counts)
             after_counts[drop["position"]] -= 1

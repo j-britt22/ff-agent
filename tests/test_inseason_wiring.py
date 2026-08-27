@@ -699,3 +699,72 @@ def test_the_lineup_headline_separates_locked_from_recommended(loaded):
                            kickoffs=kk)
     assert "already locked by kickoff" in d.headline
     assert "recommended to commit" in d.headline
+
+
+# ─── "drop Brian Thomas Jr. for a kicker" ───────────────────────────────────
+# The live run recommended cutting a real starting receiver for Chris Boswell.
+# Two independent halves, both now fixed:
+#   a) ESPN published his week-1 projection as 0.0 (out), and requiring `> 0`
+#      threw that away as though it were missing data, so he vanished from the
+#      priced frame entirely;
+#   b) with_values then silently filled him to 0.0, making him the "cheapest"
+#      thing on the roster and therefore the obvious drop.
+def test_a_published_zero_is_data_not_a_missing_value():
+    """A published 0.0 is what ESPN says about a player who is out. Discarding
+    it is discarding information, not noise."""
+    rows = [{"canonical_id": "out", "name": "Out Guy", "position": "WR",
+             "team": "JAX", "week": wk,
+             "projected_points": 0.0 if wk == 1 else None} for wk in range(1, 15)]
+    out = ROS.from_espn(pl.DataFrame(rows), from_week=1, season=2026,
+                        byes=pl.DataFrame({"team": ["JAX"], "bye_week": [8]}))
+    assert "out" in out.frame["canonical_id"].to_list(), (
+        "a player ESPN priced at zero must stay in the frame, priced at zero"
+    )
+    assert out.frame.filter(pl.col("canonical_id") == "out")["weeks_projected"][0] == 1
+
+
+def test_the_bye_week_is_excluded_from_the_rate_not_counted_as_a_zero():
+    """games_remaining already excludes the bye — counting it in the rate too
+    would charge for the same bye twice."""
+    rows = [{"canonical_id": "p", "name": "P", "position": "RB", "team": "SF",
+             "week": wk, "projected_points": 0.0 if wk == 7 else 12.0}
+            for wk in range(1, 15)]
+    out = ROS.from_espn(pl.DataFrame(rows), from_week=1, season=2026,
+                        byes=pl.DataFrame({"team": ["SF"], "bye_week": [7]}))
+    row = out.frame.filter(pl.col("canonical_id") == "p")
+    assert row["weekly_points"][0] == pytest.approx(12.0), "bye must not dilute the rate"
+    assert row["games_remaining"][0] == 13
+
+
+def test_an_unpriced_rostered_player_is_flagged_not_silently_zeroed(loaded):
+    """`priced` separates 'ESPN says he scores nothing' from 'we have no number
+    for him'. Both arrive as zero and mean opposite things."""
+    st, ros = loaded
+    thinned = ros.filter(pl.col("canonical_id") != "w1")
+    out = ST.with_values(st.my_roster, thinned, "my roster")
+    row = out.filter(pl.col("canonical_id") == "w1")
+    assert row["priced"][0] is False
+    assert row["weekly_points"][0] == 0.0        # still usable in the lineup math
+    assert ST.unpriced(out)["canonical_id"].to_list() == ["w1"]
+
+
+def test_an_unpriced_player_is_never_offered_as_a_drop(loaded):
+    """Not knowing a player's value is a reason for caution, not a licence to
+    cut him — and a zero always looks like the cheapest thing to lose."""
+    from ff_agent.inseason import waivers as WV
+    st, ros = loaded
+    thinned = ros.filter(pl.col("canonical_id") != "r1")   # my best RB, now blind
+    mine = ST.align(ST.with_values(st.my_roster, thinned, "mine"))
+    pool = ST.align(ST.with_values(st.free_agents, ros, "fa"))
+    pairs = WV.candidate_pairs(mine, pool, tuple(range(WEEK, 15)))
+    assert all(drop != "r1" for _add, drop, _v in pairs), (
+        "the unpriced player must not be the drop the engine reaches for first"
+    )
+
+
+def test_the_digest_names_unpriced_roster_players(loaded):
+    st, ros = loaded
+    thinned = ros.filter(pl.col("canonical_id") != "w1")
+    d, _ = B.waivers_digest(st, thinned, n_sims=400)
+    assert any("NO PROJECTION" in n for n in d.notes)
+    assert any("My WR1" in n for n in d.notes)

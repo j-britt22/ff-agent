@@ -399,10 +399,17 @@ def with_values(
         )
     from ff_agent.inseason.ros import normalize_schema
 
-    missing = out.filter(pl.col("weekly_points").is_null())
-    if missing.height:
-        out = out.with_columns(pl.col("weekly_points").fill_null(0.0),
-                               pl.col("ros_points").fill_null(0.0))
+    # `priced` separates "ESPN says he will score nothing" from "we have no
+    # number for him". Both arrive as a zero once filled, and they mean opposite
+    # things: the first is a legitimate drop candidate, the second is a player we
+    # know nothing about and must not offer to cut. Filling silently made an
+    # unpriced starter the single most attractive thing on the roster to drop.
+    out = out.with_columns(
+        pl.col("weekly_points").is_not_null().alias("priced")
+    ).with_columns(
+        pl.col("weekly_points").fill_null(0.0),
+        pl.col("ros_points").fill_null(0.0),
+    )
     # Same reason as ros.normalize_schema: rosters and free agents are spliced
     # together constantly, and a left join can widen a column's dtype.
     return normalize_schema(out)
@@ -412,7 +419,7 @@ def with_values(
 ENGINE_COLUMNS = (
     "canonical_id", "name", "position", "team", "weekly_points", "ros_points",
     "bye_week", "anchor_points", "anchor_weekly", "sack_correction",
-    "kicker_correction", "games_remaining", "lineup_slot",
+    "kicker_correction", "games_remaining", "lineup_slot", "priced",
 )
 """Exactly what a roster row and a free-agent row must BOTH carry.
 
@@ -423,6 +430,13 @@ from different ESPN endpoints with different columns — the roster carries
 so without a contract the splice fails on the first real run with a
 ColumnNotFoundError from deep inside polars. Which is how this was found.
 """
+
+
+def unpriced(frame: pl.DataFrame) -> pl.DataFrame:
+    """Rostered players we have no projection for. Never droppable, always said."""
+    if "priced" not in frame.columns:
+        return frame.head(0)
+    return frame.filter(~pl.col("priced").fill_null(False))
 
 
 def align(frame: pl.DataFrame, label: str = "frame") -> pl.DataFrame:
@@ -450,5 +464,5 @@ _ENGINE_DTYPES = {
     "bye_week": pl.Int64, "anchor_points": pl.Float64,
     "anchor_weekly": pl.Float64, "sack_correction": pl.Float64,
     "kicker_correction": pl.Float64, "games_remaining": pl.Int64,
-    "lineup_slot": pl.Utf8,
+    "lineup_slot": pl.Utf8, "priced": pl.Boolean,
 }

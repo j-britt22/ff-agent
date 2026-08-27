@@ -136,6 +136,15 @@ def waivers_digest(
         ))
 
     notes = list(result.notes) + list(state.notes)
+    blind = ST.unpriced(mine)
+    if blind.height:
+        notes.insert(0, (
+            f"NO PROJECTION for {blind.height} player(s) on MY roster: "
+            + ", ".join(blind["name"].to_list()[:8])
+            + ". They read as zero in the lineup and are excluded from drop "
+            "candidates — not knowing a player's value is a reason for caution, "
+            "not a licence to cut him."
+        ))
     tl = _title_line(state, means)
     if tl:
         notes.insert(0, tl)

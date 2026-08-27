@@ -361,36 +361,39 @@ def from_espn(
         )
 
     # ESPN PUBLISHES ONLY THE WEEKS IT HAS PROJECTED — often just the upcoming
-    # one, especially before the season starts. Summing the window and treating
-    # the unpublished weeks as ZERO made every player roughly 1/14th of himself:
-    # Justin Herbert came back at 1.6 points a week and a full starting lineup
-    # at 10.3 instead of ~130. Worse than uniformly wrong, it was UNEVEN — a
-    # player with two published weeks outranked an identical one with a single
-    # published week, purely on ESPN's publishing schedule.
+    # one. Summing the window and treating unpublished weeks as ZERO made every
+    # player roughly 1/14th of himself, and unevenly so.
     #
-    # So the rate is taken over the weeks that actually carry a projection, and
-    # the season total is rebuilt from it. A zero is treated as "not projected"
-    # rather than "projected to score nothing": a real zero week is a BYE, which
-    # is not a game and is already excluded from games_remaining below, so
-    # dropping it from the per-game rate is correct on both counts.
-    scored = pl.col("projected_points").is_not_null() & (pl.col("projected_points") > 0)
+    # NULL and 0.0 are different facts and must be treated differently. A null
+    # week is one ESPN has not published. A published 0.0 is real information:
+    # it is what ESPN says about a player who is injured, suspended or out. An
+    # earlier version required `> 0`, which threw the second away — so a player
+    # ESPN had projected at zero looked UNPRICED, got dropped from the frame,
+    # was silently filled with 0.0 downstream, and became the most attractive
+    # thing on the roster to cut. It recommended dropping Brian Thomas Jr. for a
+    # kicker.
+    #
+    # The bye week is excluded from the RATE rather than counted as a zero,
+    # because games_remaining already excludes it below — counting it in both
+    # places would charge for the same bye twice.
+    n_weeks = len(weeks)
+    if byes is not None and "bye_week" in byes.columns:
+        ahead = ahead.join(byes.select("team", "bye_week"), on="team", how="left")
+    else:
+        ahead = ahead.with_columns(pl.lit(None, dtype=pl.Int64).alias("bye_week"))
+
+    on_bye = pl.col("bye_week").is_not_null() & (pl.col("week") == pl.col("bye_week"))
+    scored = pl.col("projected_points").is_not_null() & ~on_bye
     agg = ahead.group_by("canonical_id").agg(
         pl.col("position").first(),
         pl.col("team").first(),
+        pl.col("bye_week").first(),
         pl.col("name").first() if "name" in ahead.columns else pl.lit(None).alias("name"),
         pl.col("projected_points").filter(scored).mean().alias("_rate"),
         pl.col("projected_points").filter(scored).len().alias("weeks_projected"),
     )
 
-    # games_remaining excludes the bye: the NFL plays 18 weeks and 17 GAMES, and
-    # M7 paid 6.25% for getting that divisor wrong in the other direction.
     notes: list[str] = []
-    n_weeks = len(weeks)
-    if byes is not None and "bye_week" in byes.columns:
-        agg = agg.join(byes.select("team", "bye_week"), on="team", how="left")
-    else:
-        agg = agg.with_columns(pl.lit(None, dtype=pl.Int64).alias("bye_week"))
-
     agg = agg.with_columns(
         (
             n_weeks
@@ -413,6 +416,14 @@ def from_espn(
         # week 2" reads very differently from "the cache is missing" — and says
         # so. Adding a second, vaguer sentence here printed the same warning
         # twice in every digest.
+
+    dead = agg.filter(pl.col("games_remaining") <= 0)
+    if dead.height:
+        agg = agg.filter(pl.col("games_remaining") > 0)
+        notes.append(
+            f"{dead.height} player(s) have no games left in the window and were "
+            f"dropped rather than divided by zero."
+        )
 
     # Coverage is stated, because "ESPN has projected one of fourteen weeks" and
     # "this player is projected to score very little" look identical in a total.
@@ -438,14 +449,6 @@ def from_espn(
         notes.append(
             f"{blank.height} player(s) have no published projection at all and "
             f"were dropped rather than priced at zero."
-        )
-
-    dead = agg.filter(pl.col("games_remaining") <= 0)
-    if dead.height:
-        agg = agg.filter(pl.col("games_remaining") > 0)
-        notes.append(
-            f"{dead.height} player(s) have no games left in the window and were "
-            f"dropped rather than divided by zero."
         )
 
     out = build(agg, from_week=from_week, weight=weight, season=season)
