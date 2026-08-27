@@ -198,6 +198,13 @@ def simulate(
 
     sched = SCH.league_schedule(season)
     teams = sorted(team_means)
+    if len(teams) < PLAYOFF_TEAMS:
+        raise ValueError(
+            f"{len(teams)} team(s) given but the bracket seats {PLAYOFF_TEAMS}. "
+            f"Refusing to index past the end of the league — the alternative is "
+            f"an IndexError from inside numpy, which is the stack trace §10 says "
+            f"not to hand a human."
+        )
     idx = {t: i for i, t in enumerate(teams)}
     n = len(teams)
     weeks = sorted(sched["week"].unique().to_list())

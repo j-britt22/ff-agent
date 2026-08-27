@@ -247,3 +247,168 @@ def droppable(
             after[position_of_add] = after.get(position_of_add, 0) + 1
         keep.append(not starter_holes(after))
     return roster.filter(pl.Series(keep))
+
+
+# ─── Building a real LeagueState from live ESPN ──────────────────────────────
+def _normalize(df: pl.DataFrame) -> pl.DataFrame:
+    """ESPN's spellings -> ours, at the boundary rather than at each join.
+
+    The Rams trap bit this project three times by being fixed downstream, so
+    team AND position vocabulary are canonicalised once, here.
+    """
+    from ff_agent.inseason import freeagents as FA
+
+    return df.with_columns(
+        pl.col("position").map_elements(FA.normalize_position, return_dtype=pl.Utf8),
+        pl.col("team").map_elements(CW.normalize_team, return_dtype=pl.Utf8),
+    )
+
+
+def load(
+    season: int = SEASON,
+    week: int | None = None,
+    my_team: str = MY_TEAM_NAME,
+    free_agent_keep: int = 120,
+    offline: bool | None = None,
+) -> LeagueState:
+    """Read the whole league as of ``week``. The read half of every job.
+
+    Fails loudly on anything that would make a recommendation wrong rather than
+    merely incomplete: an unresolvable ROSTERED player is fatal (that is M1's
+    gate, and a rostered player we cannot price silently distorts my own lineup),
+    while an unresolvable FREE AGENT is reported and skipped.
+    """
+    from ff_agent.data import espn as ESPN
+    from ff_agent.data import byes as BY
+    from ff_agent.inseason import clock as CK
+    from ff_agent.inseason import freeagents as FA
+
+    notes: list[str] = []
+    kw = {} if offline is None else {"offline": offline}
+
+    if week is None:
+        week = CK.current_week(season) or 1
+
+    rosters_raw = _normalize(ESPN.current_rosters(season, **kw))
+    rosters, ros_bad = resolve(rosters_raw, "rosters")
+    if ros_bad.height:
+        # M1's gate, unchanged: a rostered player who cannot be priced distorts
+        # MY lineup, which is the one thing every job depends on.
+        raise StateError(
+            f"{ros_bad.height} ROSTERED player(s) could not be resolved to a "
+            f"canonical id.\n{unresolved_note(ros_bad, 'rostered players')}\n"
+            f"  Unlike a free agent, a rostered player cannot be skipped — he is "
+            f"in somebody's starting lineup and every number here depends on it."
+        )
+
+    proj = _normalize(FA.playable(ESPN.player_projections(season, **kw)))
+    rostered_ids = set(rosters_raw["espn_id"].to_list())
+    fa_raw = FA.pool(proj, rostered_ids).unique(subset=["espn_id"], keep="first")
+    free_agents, fa_bad = resolve(fa_raw, "free agents")
+    note = unresolved_note(fa_bad, "free agents")
+    if note:
+        notes.append(note)
+
+    try:
+        waivers = ESPN.waiver_order(season, **kw)
+    except Exception as exc:
+        waivers = pl.DataFrame(schema={
+            "team_id": pl.Int64, "fantasy_team": pl.Utf8, "waiver_rank": pl.Int64})
+        notes.append(
+            f"waiver priority unavailable ({type(exc).__name__}) — claims are "
+            f"ordered but their odds are not."
+        )
+
+    completed = ESPN.weekly_results(season, through_week=max(week - 1, 0), **kw)
+    if week > 1:
+        assert_covers_completed_week(completed, week - 1, "ESPN results")
+
+    byes = BY.bye_weeks(season).select(
+        pl.col("team"), pl.col("bye_week").cast(pl.Int64))
+    rosters = rosters.join(byes, on="team", how="left")
+    free_agents = free_agents.join(byes, on="team", how="left")
+
+    return LeagueState(
+        season=season, week=week, rosters=rosters, free_agents=free_agents,
+        unresolved=fa_bad, waiver_order=waivers, completed=completed,
+        my_team=my_team, notes=notes,
+    )
+
+
+def with_values(
+    frame: pl.DataFrame, ros_frame: pl.DataFrame, label: str = "roster"
+) -> pl.DataFrame:
+    """Join a roster or FA pool to its rest-of-season numbers.
+
+    Separate from ``load`` on purpose: identity and value are different
+    questions, and keeping them apart is what lets every engine be tested with
+    made-up numbers against a real roster shape, or vice versa.
+    """
+    cols = [c for c in (
+        "ros_points", "weekly_points", "anchor_points", "anchor_weekly",
+        "sack_correction", "kicker_correction", "games_remaining",
+    ) if c in ros_frame.columns]
+    out = frame.join(
+        ros_frame.select("canonical_id", *cols), on="canonical_id", how="left"
+    )
+    if out.height != frame.height:
+        raise StateError(
+            f"{label}: the value join changed the row count ({frame.height} -> "
+            f"{out.height}). §0.2 — a fan-out breaks one-row-per-player as "
+            f"thoroughly as an unresolved id."
+        )
+    from ff_agent.inseason.ros import normalize_schema
+
+    missing = out.filter(pl.col("weekly_points").is_null())
+    if missing.height:
+        out = out.with_columns(pl.col("weekly_points").fill_null(0.0),
+                               pl.col("ros_points").fill_null(0.0))
+    # Same reason as ros.normalize_schema: rosters and free agents are spliced
+    # together constantly, and a left join can widen a column's dtype.
+    return normalize_schema(out)
+
+
+# ─── The column contract the engines splice against ──────────────────────────
+ENGINE_COLUMNS = (
+    "canonical_id", "name", "position", "team", "weekly_points", "ros_points",
+    "bye_week", "anchor_points", "anchor_weekly", "sack_correction",
+    "kicker_correction", "games_remaining", "lineup_slot",
+)
+"""Exactly what a roster row and a free-agent row must BOTH carry.
+
+The waiver engine splices a free agent into a roster frame to score an (add,
+drop) pair, and the trade engine splices two rosters together. Those frames come
+from different ESPN endpoints with different columns — the roster carries
+``team_id``/``manager``, the free agent carries ``week``/``projected_points`` —
+so without a contract the splice fails on the first real run with a
+ColumnNotFoundError from deep inside polars. Which is how this was found.
+"""
+
+
+def align(frame: pl.DataFrame, label: str = "frame") -> pl.DataFrame:
+    """Reduce a frame to the engine contract, filling anything absent.
+
+    Fills rather than raises, because the two sides legitimately differ: a free
+    agent has no ``lineup_slot`` and never will. What must not differ is the
+    SHAPE.
+    """
+    if frame.is_empty():
+        return pl.DataFrame(schema={c: _ENGINE_DTYPES[c] for c in ENGINE_COLUMNS})
+    out = frame
+    for col in ENGINE_COLUMNS:
+        if col not in out.columns:
+            out = out.with_columns(
+                pl.lit(None, dtype=_ENGINE_DTYPES[col]).alias(col))
+    return out.select(list(ENGINE_COLUMNS)).with_columns([
+        pl.col(c).cast(t) for c, t in _ENGINE_DTYPES.items()
+    ])
+
+
+_ENGINE_DTYPES = {
+    "canonical_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8,
+    "team": pl.Utf8, "weekly_points": pl.Float64, "ros_points": pl.Float64,
+    "bye_week": pl.Int64, "anchor_points": pl.Float64,
+    "anchor_weekly": pl.Float64, "sack_correction": pl.Float64,
+    "kicker_correction": pl.Float64, "games_remaining": pl.Int64,
+    "lineup_slot": pl.Utf8,
+}

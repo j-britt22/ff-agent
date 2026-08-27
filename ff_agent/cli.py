@@ -976,8 +976,38 @@ def cmd_monitor(args) -> int:
     if args.job == "tick":
         return _tick(args)
 
-    print(f"job {args.job!r} needs live ESPN state; run `cli verify` first.")
-    return _run_state_job(args)
+    dispatch = {
+        "waivers": cmd_waivers, "trades": cmd_trades, "week14": cmd_week14,
+        "lineup": cmd_lineup,
+    }
+    if args.job in dispatch:
+        if not hasattr(args, "week"):
+            args.week = None
+        return dispatch[args.job](args)
+    if args.job in ("refresh", "freeagents", "injuries"):
+        return _refresh(args, args.job)
+    print(f"job {args.job!r} has no builder yet.")
+    return 1
+
+
+def _refresh(args, job: str) -> int:
+    """Pull fresh data and report what moved. No digest unless it fails."""
+    from ff_agent.data import espn as ESPN
+    from ff_agent.data import nflverse as NV
+    from ff_agent.data.espn import ESPNAuthError, ESPNUnavailable
+
+    try:
+        rosters = ESPN.current_rosters(SEASON, force=True)
+        proj = ESPN.player_projections(SEASON, force=True)
+        results = ESPN.weekly_results(SEASON, force=True)
+        NV.injuries(SEASON, force=True)
+    except (ESPNAuthError, ESPNUnavailable) as exc:
+        print(exc)
+        return 1
+    weeks = sorted(results["week"].unique().to_list()) if results.height else []
+    print(f"refreshed: {rosters.height} rostered · {proj.height} projection rows · "
+          f"{len(weeks)} completed week(s) {weeks}")
+    return 0
 
 
 def _tick(args) -> int:
@@ -1018,29 +1048,62 @@ def _tick(args) -> int:
         return 0
     for c in due:
         print(f"  DUE  {c.kind:13s} {c.label()}")
-    return _run_state_job(args)
+    args.week = week
+    # Only the weekly advisory is unconditional; every later checkpoint speaks
+    # solely when the answer moved (§6.4).
+    args.unconditional = any(c.unconditional for c in due)
+    return cmd_lineup(args)
 
 
-def _run_state_job(args) -> int:
-    """Jobs that need live league state. Fails with a fix, never a stack trace."""
+def _load_state_and_ros(args, week=None):
+    """The read half every real job shares: league state + ROS numbers.
+
+    Kept in one place because a job that built its own state differently from
+    the others would produce recommendations that quietly disagree.
+    """
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import ros as ROS
+    from ff_agent.inseason import state as ST
+
+    st = ST.load(SEASON, week=week)
+    proj = ST._normalize(ESPN.player_projections(SEASON))
+    resolved, _bad = ST.resolve(proj, "projections")
+    from ff_agent.data import byes as BY
+    byes = BY.bye_weeks(SEASON).select("team", pl.col("bye_week").cast(pl.Int64))
+    ros = ROS.from_espn(resolved, from_week=st.week, byes=byes, season=SEASON)
+    return st, ros.frame, ros.notes
+
+
+def _run_job(args, job: str, build, week=None, unconditional=False) -> int:
+    """Build the digest for real, then hand it to the guarded runner."""
     from ff_agent.data.espn import ESPNAuthError, ESPNUnavailable
+    from ff_agent.inseason import digest as DG
     from ff_agent.inseason import jobs as J
+    from ff_agent.inseason import state as ST
 
-    blocked = J.gate(SEASON)
-    if blocked is not None:
-        print(blocked.detail)
-        if blocked.digest is not None:
-            for _title, lines in blocked.digest.sections:
-                for ln in lines:
-                    print(f"  {ln}")
+    try:
+        st, ros, notes = _load_state_and_ros(args, week=week)
+    except (ESPNAuthError, ESPNUnavailable, ST.StateError) as exc:
+        print(exc)
         return 1
-    print("league state reachable. The per-job builders read it here;")
-    print("run `cli verify` and `cli monitor --job preflight` before the season.")
-    return 0
+
+    def _build():
+        d, fp = build(st, ros)
+        d.notes = list(notes) + list(d.notes)
+        return d, fp
+
+    res = J.run(job, _build, notifier=_notifier(args), season=SEASON,
+                week=st.week, unconditional=unconditional)
+    if res.digest is not None:
+        print(DG.to_text(res.digest, None))
+    print(f"\n[{job}] {res.detail}")
+    return 0 if res.ok else 1
 
 
 def cmd_lineup(args) -> int:
+    from ff_agent.inseason import builders as B
     from ff_agent.inseason import clock as CK
+
     week = args.week or CK.current_week(SEASON)
     if week is None:
         print("regular season is over.")
@@ -1051,24 +1114,34 @@ def cmd_lineup(args) -> int:
     with WIDE:
         print(CK.week_summary(week, None, SEASON))
     print(f"\n{len(CK.checkpoints_for_week(week, None, SEASON))} checkpoints derived "
-          f"from the schedule (F9), not from a fixed weekly cron.")
-    return _run_state_job(args)
+          f"from the schedule (F9), not from a fixed weekly cron.\n")
+
+    def build(st, ros):
+        from ff_agent.data import nflverse as NV
+        try:
+            inj = NV.injuries(SEASON)
+        except Exception:
+            inj = None
+        return B.lineup_digest(st, ros, injuries=inj)
+
+    return _run_job(args, "lineup", build, week=week, unconditional=True)
 
 
 def cmd_waivers(args) -> int:
-    return _run_state_job(args)
+    from ff_agent.inseason import builders as B
+    return _run_job(args, "waivers", B.waivers_digest, unconditional=True)
 
 
 def cmd_trades(args) -> int:
-    return _run_state_job(args)
+    from ff_agent.inseason import builders as B
+    return _run_job(args, "trades", B.trades_digest)
 
 
 def cmd_week14(args) -> int:
-    from ff_agent.inseason import playoffs as P
+    from ff_agent.inseason import builders as B
     print("§2.2: week 14 is my bye. No lineup, no game to lose, record locked.")
-    print("Every drop is free; every add is a pure weeks 15-17 bet.")
-    print(f"sets_a_lineup = {not P.sets_no_lineup(14)}")
-    return _run_state_job(args)
+    print("Every drop is free; every add is a pure weeks 15-17 bet.\n")
+    return _run_job(args, "week14", B.week14_digest, week=14, unconditional=True)
 
 
 def cmd_audit(args) -> int:
@@ -1172,7 +1245,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("monitor")
     p.add_argument("--job", required=True, choices=[
         "preflight", "tick", "heartbeat", "refresh", "waivers", "freeagents",
-        "injuries", "trades", "week14", "audit"])
+        "injuries", "lineup", "trades", "week14", "audit"])
     p.add_argument("--dry-run", action="store_true",
                    help="render and validate, send nothing")
     p.add_argument("--lax", action="store_true",

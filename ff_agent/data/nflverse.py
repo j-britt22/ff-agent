@@ -195,3 +195,15 @@ def ingest_all(seasons: list[int] | None = None, include_pbp: bool = True,
                 note(f"ngs_{st}", season, "fail", f"{type(e).__name__}: {e}")
 
     return pl.DataFrame(rows)
+
+
+def injuries(season: int, **kw) -> pl.DataFrame:
+    """Weekly injury report — F10's input, and it needs no crosswalk hop.
+
+    Keys on **gsis_id**, which IS our canonical id, so it joins straight to a
+    resolved roster. That is unusual enough in this project to be worth saying
+    out loud: every other external table has cost us a resolution step.
+    """
+    return cached(
+        "injuries", lambda: nfl.load_injuries(seasons=season), season=season, **kw
+    )

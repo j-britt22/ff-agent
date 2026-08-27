@@ -247,6 +247,28 @@ def assert_one_row_per_player(frame: pl.DataFrame, stage: str) -> pl.DataFrame:
     return frame
 
 
+NUMERIC_SCHEMA = {
+    "ros_points": pl.Float64, "weekly_points": pl.Float64,
+    "anchor_points": pl.Float64, "model_points": pl.Float64,
+    "sack_correction": pl.Float64, "kicker_correction": pl.Float64,
+    "games_remaining": pl.Int64, "bye_week": pl.Int64,
+}
+"""Pinned dtypes, because the engines CONCATENATE constantly.
+
+A waiver evaluation splices a free-agent row into a roster frame; a trade
+splices two rosters together. polars refuses to vstack Int32 onto Int64, so a
+column whose width came out of an arithmetic expression rather than a literal
+schema is a crash waiting for the first real run — which is exactly how this
+was found. Normalising once here beats casting at every call site.
+"""
+
+
+def normalize_schema(frame: pl.DataFrame) -> pl.DataFrame:
+    return frame.with_columns([
+        pl.col(c).cast(t) for c, t in NUMERIC_SCHEMA.items() if c in frame.columns
+    ])
+
+
 def build(
     anchor: pl.DataFrame,
     from_week: int,
@@ -277,6 +299,7 @@ def build(
         .round(2).alias("ros_points")
     )
     out = weekly_rate(out)
+    out = normalize_schema(out)
     assert_one_row_per_player(out, "the finished rest-of-season projection")
 
     if weight == 0.0:
@@ -295,3 +318,93 @@ def build(
         season=season, from_week=from_week, weeks_remaining=weeks,
         model_weight=weight, notes=notes,
     )
+
+
+# ─── Building the anchor from live ESPN projections ──────────────────────────
+def from_espn(
+    projections: pl.DataFrame,
+    from_week: int,
+    byes: pl.DataFrame | None = None,
+    soe: pl.DataFrame | None = None,
+    season: int = SEASON,
+    weight: float = MODEL_WEIGHT,
+) -> ROSProjection:
+    """Per-week ESPN projections -> the rest-of-season anchor.
+
+    ``projections`` is the long frame from ``data/espn.py::player_projections``,
+    already resolved to canonical ids: one row per (player, week) carrying
+    ``projected_points``.
+
+    Summing ESPN's own per-week numbers is F1's resolution in practice. It also
+    sidesteps M3's trap on the SEASON projection, which reports yardage per game
+    while every other field is a season total — read literally that made every
+    projection roughly 17x wrong. Per-week points carry no such asymmetry, and
+    they are already in §1 scoring.
+    """
+    need = {"canonical_id", "position", "team", "week", "projected_points"}
+    missing = sorted(need - set(projections.columns))
+    if missing:
+        raise ROSError(f"projections missing {missing}; needs {sorted(need)}.")
+
+    weeks = remaining_weeks(from_week, season)
+    if not weeks:
+        raise ROSError(
+            f"no regular-season weeks remain from week {from_week}. "
+            f"Rest-of-season value is undefined once the season is over."
+        )
+
+    ahead = projections.filter(pl.col("week").is_in(list(weeks)))
+    if ahead.is_empty():
+        raise ROSError(
+            f"no projection rows for weeks {weeks[0]}-{weeks[-1]}. ESPN may not "
+            f"have published them yet, which is not the same as projecting zero."
+        )
+
+    agg = ahead.group_by("canonical_id").agg(
+        pl.col("position").first(),
+        pl.col("team").first(),
+        pl.col("name").first() if "name" in ahead.columns else pl.lit(None).alias("name"),
+        pl.col("projected_points").fill_null(0.0).sum().round(2).alias("ros_points"),
+    )
+
+    # games_remaining excludes the bye: the NFL plays 18 weeks and 17 GAMES, and
+    # M7 paid 6.25% for getting that divisor wrong in the other direction.
+    n_weeks = len(weeks)
+    if byes is not None and "bye_week" in byes.columns:
+        agg = agg.join(byes.select("team", "bye_week"), on="team", how="left")
+    else:
+        agg = agg.with_columns(pl.lit(None, dtype=pl.Int64).alias("bye_week"))
+
+    agg = agg.with_columns(
+        (
+            n_weeks
+            - pl.when(pl.col("bye_week").is_in(list(weeks))).then(1).otherwise(0)
+        ).cast(pl.Int64).alias("games_remaining")
+    )
+
+    notes: list[str] = []
+    if soe is not None and "sacks_over_expected_per_game" in soe.columns:
+        agg = agg.join(
+            soe.select("canonical_id", "sacks_over_expected_per_game"),
+            on="canonical_id", how="left",
+        )
+    else:
+        agg = agg.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("sacks_over_expected_per_game"))
+        notes.append(
+            "no sacks-over-expected input, so §3.3's term is zero for every "
+            "quarterback. That is the one edge this league has that no public "
+            "ranking prices — worth restoring before trusting a QB claim."
+        )
+
+    dead = agg.filter(pl.col("games_remaining") <= 0)
+    if dead.height:
+        agg = agg.filter(pl.col("games_remaining") > 0)
+        notes.append(
+            f"{dead.height} player(s) have no games left in the window and were "
+            f"dropped rather than divided by zero."
+        )
+
+    out = build(agg, from_week=from_week, weight=weight, season=season)
+    out.notes = notes + out.notes
+    return out

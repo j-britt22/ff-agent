@@ -317,3 +317,245 @@ def settings_dump(year: int = SEASON, write: bool = True) -> dict[str, Any]:
         path.write_text(json.dumps(out, indent=2, default=str))
         out["_written_to"] = str(path)
     return out
+
+
+# ─── In-season reads (M10b) ──────────────────────────────────────────────────
+# Everything below is READ ONLY, like everything above it. §0.1 is asserted by
+# test_inseason_delivery.py, which scans this file too — the in-season package
+# can only be as read-only as what it reads through.
+
+PROJECTION_SCHEMA = {
+    "espn_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8, "team": pl.Utf8,
+    "week": pl.Int64, "projected_points": pl.Float64, "actual_points": pl.Float64,
+    "injury_status": pl.Utf8, "lineup_slot": pl.Utf8, "on_team_id": pl.Int64,
+    "percent_owned": pl.Float64, "source": pl.Utf8,
+}
+"""Explicit, for the same reason PLAYER_SCHEMA is: ESPN returns [] rather than
+null for several fields, and polars' inference dies on an all-empty column."""
+
+SEASON_TOTAL_PERIOD = 0
+"""ESPN keys ``Player.stats`` by scoringPeriodId, and 0 is the SEASON total
+rather than a week. Summing the dict naively counts the whole season twice."""
+
+
+def _projection_rows(players, weeks: tuple[int, ...], source: str) -> list[dict]:
+    """One row per (player, week) from ESPN's own per-week projections.
+
+    This is F1's resolution in practice: the anchor is POINTS, not RANKS,
+    because a rank has a format and a points projection does not. ESPN's numbers
+    already arrive in §1 scoring — M2 proved to the decimal that our ruleset
+    reproduces ESPN's totals from ESPN's own stat line.
+    """
+    rows: list[dict] = []
+    for p in players:
+        stats = getattr(p, "stats", None) or {}
+        base = {
+            "espn_id": str(getattr(p, "playerId", "") or ""),
+            "name": _scalar(getattr(p, "name", None)),
+            "position": _scalar(getattr(p, "position", None)),
+            "team": _scalar(getattr(p, "proTeam", None)),
+            "injury_status": _scalar(getattr(p, "injuryStatus", None)),
+            "lineup_slot": _scalar(getattr(p, "lineupSlot", None)),
+            "on_team_id": _scalar(getattr(p, "onTeamId", None), int),
+            "percent_owned": _scalar(getattr(p, "percent_owned", None), float),
+            "source": source,
+        }
+        for wk in weeks:
+            if wk == SEASON_TOTAL_PERIOD:
+                continue
+            s = stats.get(wk) or {}
+            rows.append({
+                **base,
+                "week": int(wk),
+                "projected_points": _scalar(s.get("projected_points"), float),
+                "actual_points": _scalar(s.get("points"), float),
+            })
+    return rows
+
+
+def player_projections(
+    year: int = SEASON,
+    weeks: tuple[int, ...] | None = None,
+    free_agent_size: int = 400,
+    **kw,
+) -> pl.DataFrame:
+    """Per-week projected AND actual points for every rostered player and the
+    top of free agency — the frame ``ros.from_espn`` turns into the anchor.
+
+    ``free_agent_size`` is bounded on purpose. §3.2 says the wire stays rich all
+    season (153 roster spots against 500+ relevant players), but the bottom of a
+    1200-deep pool is practice-squad noise that costs a slow request and adds
+    nothing a claim would ever be made on.
+    """
+    from ff_agent.config import REGULAR_SEASON_WEEKS
+
+    wks = tuple(weeks) if weeks else tuple(REGULAR_SEASON_WEEKS)
+
+    def fetch() -> pl.DataFrame:
+        lg = get_league(year)
+        rows: list[dict] = []
+        for t in getattr(lg, "teams", []) or []:
+            rows += _projection_rows(getattr(t, "roster", []) or [], wks, "roster")
+        try:
+            rows += _projection_rows(lg.free_agents(size=free_agent_size), wks,
+                                     "free_agent")
+        except Exception as exc:
+            raise ESPNUnavailable(
+                f"free_agents({free_agent_size}) failed: {exc}"
+            ) from exc
+        if not rows:
+            raise ESPNUnavailable(
+                f"No projections returned for {year}. If the season has not "
+                f"started ESPN may not have published weekly projections yet."
+            )
+        return pl.DataFrame(rows, schema=PROJECTION_SCHEMA)
+
+    return cached("espn_projections", fetch, season=year, source="espn", **kw)
+
+
+def current_rosters(year: int = SEASON, **kw) -> pl.DataFrame:
+    """Live rosters WITH lineup slots — what ESPN currently has starting.
+
+    Distinct from ``rosters()``, which is the historical end-of-season shape and
+    carries no slot. §5.3 needs the slot, because a locked player's slot is what
+    is already spent and our idea of what the lineup should have been is not.
+    """
+    def fetch() -> pl.DataFrame:
+        lg = get_league(year)
+        rows = []
+        for t in getattr(lg, "teams", []) or []:
+            owners = getattr(t, "owners", None) or []
+            owner = ", ".join(
+                (o.get("firstName", "") + " " + o.get("lastName", "")).strip()
+                if isinstance(o, dict) else str(o) for o in owners
+            )
+            for p in getattr(t, "roster", []) or []:
+                rows.append({
+                    "team_id": getattr(t, "team_id", None),
+                    "fantasy_team": normalize_team_name(getattr(t, "team_name", None)),
+                    "manager": owner or None,
+                    "espn_id": str(getattr(p, "playerId", "") or ""),
+                    "name": _scalar(getattr(p, "name", None)),
+                    "position": _scalar(getattr(p, "position", None)),
+                    "team": _scalar(getattr(p, "proTeam", None)),
+                    "lineup_slot": _scalar(getattr(p, "lineupSlot", None)),
+                    "injury_status": _scalar(getattr(p, "injuryStatus", None)),
+                })
+        if not rows:
+            raise ESPNUnavailable(
+                f"No rosters for {year}. If the draft has not happened yet, this "
+                f"is expected."
+            )
+        return pl.DataFrame(rows, schema={
+            "team_id": pl.Int64, "fantasy_team": pl.Utf8, "manager": pl.Utf8,
+            "espn_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8,
+            "team": pl.Utf8, "lineup_slot": pl.Utf8, "injury_status": pl.Utf8,
+        })
+
+    return cached("espn_current_rosters", fetch, season=year, source="espn", **kw)
+
+
+def weekly_results(year: int = SEASON, through_week: int | None = None, **kw) -> pl.DataFrame:
+    """Actual team scores for weeks already played — the simulator's ``completed``.
+
+    A week-9 title probability that re-simulates weeks 1-8 is not a forecast of
+    this season, so this is what stops it being one. Only weeks with a real,
+    non-zero score are returned: ESPN reports an unplayed matchup as 0-0, and
+    feeding that in as a result would hand every team a shutout.
+    """
+    def fetch() -> pl.DataFrame:
+        lg = get_league(year)
+        reg = int(getattr(getattr(lg, "settings", None), "reg_season_count", 14))
+        last = min(through_week or reg, reg)
+        rows = []
+        for wk in range(1, last + 1):
+            try:
+                boxes = lg.box_scores(wk)
+            except Exception:
+                continue                       # week not yet available
+            for b in boxes:
+                for team, score in (
+                    (getattr(b, "home_team", None), getattr(b, "home_score", 0.0)),
+                    (getattr(b, "away_team", None), getattr(b, "away_score", 0.0)),
+                ):
+                    name = normalize_team_name(getattr(team, "team_name", None)) if team else None
+                    if not name:
+                        continue              # a bye is encoded as a null side
+                    rows.append({"week": wk, "team": name, "points": float(score or 0.0)})
+        if not rows:
+            return pl.DataFrame(schema={"week": pl.Int64, "team": pl.Utf8,
+                                        "points": pl.Float64})
+        df = pl.DataFrame(rows)
+        # Drop weeks nobody has scored in — ESPN shows an unplayed matchup as 0-0.
+        played = (
+            df.group_by("week").agg(pl.col("points").max().alias("hi"))
+            .filter(pl.col("hi") > 0)["week"].to_list()
+        )
+        return df.filter(pl.col("week").is_in(played)).unique(subset=["week", "team"])
+
+    return cached("espn_results", fetch, season=year, source="espn", **kw)
+
+
+def started_lineup(year: int, week: int) -> pl.DataFrame:
+    """Who was actually STARTED in a given week — §11 step 10's ground truth.
+
+    ``box_scores`` carries ``slot_position`` per player, which is the only place
+    the distinction between started and rostered survives.
+    """
+    lg = get_league(year)
+    rows = []
+    for b in lg.box_scores(week):
+        for team, lineup in (
+            (getattr(b, "home_team", None), getattr(b, "home_lineup", []) or []),
+            (getattr(b, "away_team", None), getattr(b, "away_lineup", []) or []),
+        ):
+            name = normalize_team_name(getattr(team, "team_name", None)) if team else None
+            if not name:
+                continue
+            for p in lineup:
+                rows.append({
+                    "week": week, "fantasy_team": name,
+                    "espn_id": str(getattr(p, "playerId", "") or ""),
+                    "name": _scalar(getattr(p, "name", None)),
+                    "slot_position": _scalar(getattr(p, "slot_position", None)),
+                    "points": _scalar(getattr(p, "points", None), float),
+                    "projected_points": _scalar(getattr(p, "projected_points", None), float),
+                })
+    if not rows:
+        raise ESPNUnavailable(f"No box scores for {year} week {week}.")
+    return pl.DataFrame(rows)
+
+
+def transactions(year: int, scoring_period: int | None = None) -> pl.DataFrame:
+    """Adds, drops, waiver claims and FAILED claims.
+
+    ``WAIVER_ERROR`` rows are the league's only observed counterfactual — the
+    sole evidence available for calibrating §9.3's P(claim succeeds), and what
+    F4's most-added control is rebuilt from now that ``player_owned_espn`` turns
+    out to be null in-season.
+    """
+    lg = get_league(year)
+    try:
+        txns = lg.transactions(
+            scoring_period=scoring_period,
+            types={"FREEAGENT", "WAIVER", "WAIVER_ERROR"},
+        )
+    except Exception as exc:
+        raise ESPNUnavailable(f"transactions({scoring_period}) failed: {exc}") from exc
+    rows = []
+    for t in txns or []:
+        for action in getattr(t, "actions", []) or []:
+            team, verb, player = (list(action) + [None, None, None])[:3]
+            rows.append({
+                "scoring_period": scoring_period,
+                "fantasy_team": normalize_team_name(getattr(team, "team_name", None))
+                if team else None,
+                "action": verb,
+                "espn_id": str(getattr(player, "playerId", "") or "") or None,
+                "name": getattr(player, "name", None) if player else None,
+            })
+    if not rows:
+        return pl.DataFrame(schema={
+            "scoring_period": pl.Int64, "fantasy_team": pl.Utf8,
+            "action": pl.Utf8, "espn_id": pl.Utf8, "name": pl.Utf8})
+    return pl.DataFrame(rows)
