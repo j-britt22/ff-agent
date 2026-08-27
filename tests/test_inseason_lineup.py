@@ -260,3 +260,138 @@ def test_an_injury_fan_out_is_refused():
                          "practice_status": [None, None]})
     # unique() keeps one, so the join stays 1:1 — that is the point of the guard
     assert AV.attach(r, dupe).height == r.height
+
+
+# ─── the "3 pinned to RB" bug, found live in week 1 ──────────────────────────
+# `monitor --job waivers`'s sibling job crashed on the first real run:
+# "PinError: 3 players pinned to 'RB', which has only 2 starting spot(s)."
+# Two compounding mistakes, both in `build()`:
+#   1. `early` meant "everyone before the LAST kickoff of the week" — on a real
+#      week that is nearly the whole active roster (everything but Monday
+#      Night), not just "the Thursday crowd" the module's own docstring claims.
+#   2. Every candidate's slot was computed against the same static, never-
+#      updated `pins` dict, so three RBs in the same window were each
+#      independently told "you'd take RB" with no memory of the other two.
+def _week1_sunday_kickoffs():
+    def game(gid, day, time, away, home):
+        return {"game_id": gid, "season": 2026, "week": 1, "game_type": "REG",
+                "gameday": day, "gametime": time,
+                "weekday": dt.date.fromisoformat(day).strftime("%A"),
+                "away_team": away, "home_team": home}
+    return CK.kickoff_table(2026, pl.DataFrame([
+        game("a", "2026-09-13", "13:00", "BUF", "NYJ"),
+        game("b", "2026-09-13", "13:00", "KC", "DEN"),
+        game("c", "2026-09-13", "13:00", "SF", "SEA"),
+        game("d", "2026-09-14", "20:15", "DAL", "NYG"),   # the only later window
+    ]))
+
+
+def _three_rb_roster():
+    """The exact shape that crashed: three RBs, all in the SAME kickoff window,
+    for two RB slots and one FLEX — with real bench depth at every other slot
+    so the crash isn't an artefact of a too-thin fixture."""
+    return pl.DataFrame({
+        "canonical_id": ["q1", "r1", "r2", "r3", "w1", "w2", "t1", "k1", "d1", "mon"],
+        "name": ["QB1", "RB1", "RB2", "RB3", "WR1", "WR2", "TE1", "K1", "DST1", "MonGuy"],
+        "position": ["QB", "RB", "RB", "RB", "WR", "WR", "TE", "K", "DST", "WR"],
+        "team": ["BUF", "KC", "SF", "NYJ", "DEN", "SEA", "BUF", "KC", "SEA", "DAL"],
+        "weekly_points": [22.0, 18.0, 16.0, 14.0, 15.0, 13.0, 9.0, 8.0, 7.0, 12.0],
+    })
+
+
+def test_three_same_window_rbs_no_longer_crash(kickoffs):
+    """The literal reproduction. Must not raise PinError."""
+    kk = _week1_sunday_kickoffs()
+    now = dt.datetime(2026, 9, 10, 9, 0, tzinfo=ET)
+    plan = L.build(_three_rb_roster(), 1, kk, now=now)      # must not raise
+    # 9 filled of 10 starter slots: this fixture carries only one QB, so QB2
+    # is legitimately empty rather than a symptom of the bug under test.
+    assert plan.starters.height == 9
+
+
+def test_the_third_rb_is_bumped_to_flex_not_dropped_or_duplicated(kickoffs):
+    kk = _week1_sunday_kickoffs()
+    now = dt.datetime(2026, 9, 10, 9, 0, tzinfo=ET)
+    plan = L.build(_three_rb_roster(), 1, kk, now=now)
+    slots = dict(zip(plan.starters["canonical_id"].to_list(),
+                     plan.starters["slot"].to_list()))
+    rb_slots = [slots[c] for c in ("r1", "r2", "r3") if c in slots]
+    assert sorted(rb_slots) == ["FLEX", "RB", "RB"], slots
+    # exactly two RB pins, never three
+    assert list(plan.pins.values()).count("RB") <= 2
+
+
+def test_early_is_restricted_to_the_single_soonest_window(kickoffs):
+    """Not 'everyone before the last game' — only the next lock. A Sunday-1pm
+    body must not be forced into a decision when Thursday hasn't even happened
+    yet, and must not be re-litigated once its own window has already passed."""
+    def game(gid, day, time, away, home, wk=1):
+        return {"game_id": gid, "season": 2026, "week": wk, "game_type": "REG",
+                "gameday": day, "gametime": time,
+                "weekday": dt.date.fromisoformat(day).strftime("%A"),
+                "away_team": away, "home_team": home}
+    kk = CK.kickoff_table(2026, pl.DataFrame([
+        game("a", "2026-09-10", "20:15", "BUF", "NYJ"),   # Thursday
+        game("b", "2026-09-13", "13:00", "KC", "DEN"),    # Sunday early
+        game("c", "2026-09-14", "20:15", "DAL", "NYG"),   # Monday
+    ]))
+    roster = pl.DataFrame({
+        "canonical_id": ["thu", "sun", "mon"],
+        "name": ["ThuGuy", "SunGuy", "MonGuy"],
+        "position": ["WR", "WR", "WR"], "team": ["BUF", "KC", "DAL"],
+        "weekly_points": [15.0, 14.0, 13.0],
+    })
+    wednesday = dt.datetime(2026, 9, 9, 9, 0, tzinfo=ET)
+    plan = L.build(roster, 1, kk, now=wednesday)
+    assert [d.canonical_id for d in plan.decisions] == ["thu"], (
+        "the Sunday player must not face a decision before Thursday has locked"
+    )
+
+
+def test_a_forced_bench_is_explicit_not_silently_dropped(kickoffs):
+    """When even FLEX is gone, the player still appears in the digest with a
+    stated reason — omitting him would look like he was never considered."""
+    kk = _week1_sunday_kickoffs()
+    roster = pl.DataFrame({
+        "canonical_id": ["w1", "w2", "w3", "w4", "t1", "k1", "d1", "mon"],
+        "name": ["WR1", "WR2", "WR3", "WR4", "TE1", "K1", "DST1", "Mon"],
+        "position": ["WR", "WR", "WR", "WR", "TE", "K", "DST", "WR"],
+        "team": ["DEN", "SEA", "MIA", "NE", "BUF", "KC", "SEA", "DAL"],
+        "weekly_points": [18.0, 16.0, 15.0, 13.0, 9.0, 8.0, 7.0, 3.0],
+    })
+    kk2 = CK.kickoff_table(2026, pl.DataFrame([
+        {"game_id": "a", "season": 2026, "week": 1, "game_type": "REG",
+         "gameday": "2026-09-13", "gametime": "13:00", "weekday": "Sunday",
+         "away_team": t[0], "home_team": t[1]}
+        for t in [("BUF", "NYJ"), ("KC", "DEN"), ("SF", "SEA"), ("MIA", "NE")]
+    ] + [{"game_id": "e", "season": 2026, "week": 1, "game_type": "REG",
+          "gameday": "2026-09-14", "gametime": "20:15", "weekday": "Monday",
+          "away_team": "DAL", "home_team": "NYG"}]))
+    now = dt.datetime(2026, 9, 10, 9, 0, tzinfo=ET)
+    plan = L.build(roster, 1, kk2, now=now)
+    forced = [d for d in plan.decisions if d.forced_bench_reason]
+    assert forced, "expected at least one forced bench once WR + FLEX fill up"
+    assert forced[0].call == "BENCH"
+    assert "no WR/FLEX slot remains" in forced[0].reason()
+
+
+def test_a_single_early_candidate_is_unaffected(kickoffs):
+    """The classic case — one Thursday player, nobody competing with him for a
+    slot — must behave exactly as before this fix."""
+    plan = L.build(roster(19.0), 7, kickoffs, WEDNESDAY)
+    assert len(plan.decisions) == 1
+    assert plan.decisions[0].canonical_id == "thu"
+
+
+def test_working_pins_never_exceed_starter_capacity(kickoffs):
+    """The general property behind the specific bug: however many same-window
+    candidates exist, no slot is ever over-committed."""
+    from ff_agent.config import STARTER_SLOTS
+    kk = _week1_sunday_kickoffs()
+    now = dt.datetime(2026, 9, 10, 9, 0, tzinfo=ET)
+    plan = L.build(_three_rb_roster(), 1, kk, now=now)
+    counts: dict[str, int] = {}
+    for slot in plan.pins.values():
+        counts[slot] = counts.get(slot, 0) + 1
+    for slot, n in counts.items():
+        assert n <= STARTER_SLOTS.get(slot, 0), (slot, n)

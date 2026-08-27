@@ -218,6 +218,12 @@ class Decision:
     start_value: float
     bench_value: float
     p_out: float
+    forced_bench_reason: str | None = None
+    """Set when no slot exists at all — a same-window teammate outranked him
+    for the position and FLEX. Not a close call to weigh; there is nothing to
+    start him INTO. Kept distinct from a normal BENCH so ``reason()`` can say
+    that plainly instead of quoting a delta against a slot that was never on
+    offer."""
 
     @property
     def delta(self) -> float:
@@ -225,11 +231,15 @@ class Decision:
 
     @property
     def call(self) -> str:
+        if self.forced_bench_reason:
+            return "BENCH"
         if abs(self.delta) < MATERIAL:
             return "toss-up"
         return "START" if self.delta > 0 else "BENCH"
 
     def reason(self) -> str:
+        if self.forced_bench_reason:
+            return self.forced_bench_reason
         if self.call == "toss-up":
             return (
                 f"within {MATERIAL} pts either way — the option you give up by "
@@ -324,41 +334,75 @@ def build(
             + ", ".join(benched["name"].to_list()[:6])
         )
 
-    # Every player who is not locked and whose game starts before the LAST game
-    # of the week faces a commit-or-wait choice. In practice that is the Thursday
-    # (or Wednesday, or Christmas Friday) crowd.
+    # Only the SINGLE SOONEST still-open kickoff faces a commit-or-wait choice,
+    # and only if a LATER window exists to actually wait for.
+    #
+    # An earlier version used "everyone before the last game of the week" —
+    # which on a normal week is almost the entire active roster, since only
+    # Monday-night players are excluded. That pulled every Sunday-1pm player
+    # into the same decision as the Thursday game, all evaluated at once. §5.3's
+    # question is specifically "lock in NOW versus wait for MORE information" —
+    # that only means something for the window coming up next. Once it locks,
+    # the NEXT checkpoint asks the same question about whatever is next after
+    # that, with better information than we have right now.
     open_players = r.filter(pl.col("plays_this_week") & ~pl.col("locked"))
     if open_players.is_empty():
         notes.append("every slot is already locked — nothing to decide.")
+        early = open_players.head(0)
+    else:
+        next_kickoff = open_players["kickoff"].min()
+        last_kick = open_players["kickoff"].max()
+        early = (
+            open_players.filter(pl.col("kickoff") == next_kickoff)
+            if next_kickoff < last_kick else open_players.head(0)
+        )
 
-    last_kick = open_players["kickoff"].max() if open_players.height else None
-    early = (
-        open_players.filter(pl.col("kickoff") < last_kick)
-        if last_kick is not None else open_players.head(0)
-    )
-
+    # Candidates in the SAME window can compete for the SAME slot — e.g. three
+    # Sunday-1pm running backs for two RB spots and one FLEX. Processing them
+    # against a dict that updates as each is decided is what stops all three
+    # independently being told "you'd take RB": once the first two claim it,
+    # `_best_slot_for` correctly sees zero RB and offers the third only FLEX,
+    # then nothing. Best-value-first, so the strongest case for locking early
+    # gets first claim on a contested slot — the same "best available" rule
+    # `optimal_lineup` itself uses.
     decisions: list[Decision] = []
-    for row in early.iter_rows(named=True):
+    working_pins = dict(pins)
+    ordered = early.sort("weekly_points", descending=True, nulls_last=True)
+    for row in ordered.iter_rows(named=True):
         cid = row["canonical_id"]
-        best_slot = _best_slot_for(r, cid, pins)
+        bench_v = commitment_value(r, working_pins, {cid}, n_draws, seed)
+        best_slot = _best_slot_for(r, cid, working_pins)
         if best_slot is None:
+            # No RB/FLEX capacity left once higher-value same-window players
+            # claimed it. Still reported — silently dropping him from the
+            # digest would look like he was never considered at all.
+            decisions.append(Decision(
+                canonical_id=cid, name=row.get("name") or cid,
+                position=row["position"], team=row.get("team") or "",
+                slot="BENCH", kickoff=row["kickoff"],
+                start_value=bench_v, bench_value=bench_v,
+                p_out=float(row.get("p_out") or 0.0),
+                forced_bench_reason=(
+                    f"no {row['position']}/FLEX slot remains once the higher-"
+                    f"value players in this same kickoff window are locked in"
+                ),
+            ))
             continue
-        start_v = commitment_value(r, {**pins, cid: best_slot}, None, n_draws, seed)
-        bench_v = commitment_value(r, pins, {cid}, n_draws, seed)
-        decisions.append(Decision(
+        start_v = commitment_value(
+            r, {**working_pins, cid: best_slot}, None, n_draws, seed)
+        d = Decision(
             canonical_id=cid, name=row.get("name") or cid,
             position=row["position"], team=row.get("team") or "",
             slot=best_slot, kickoff=row["kickoff"],
             start_value=start_v, bench_value=bench_v,
             p_out=float(row.get("p_out") or 0.0),
-        ))
+        )
+        decisions.append(d)
+        if d.call == "START":
+            working_pins[cid] = best_slot
     decisions.sort(key=lambda d: (d.kickoff, -abs(d.delta)))
 
-    # The recommended lineup: commit everything the counterfactual says to commit.
-    final_pins = dict(pins)
-    for d in decisions:
-        if d.call == "START":
-            final_pins[d.canonical_id] = d.slot
+    final_pins = working_pins
 
     playable = r.filter(pl.col("plays_this_week"))
     lu = LU.optimal_lineup(
