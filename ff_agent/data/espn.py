@@ -327,15 +327,27 @@ def settings_dump(year: int = SEASON, write: bool = True) -> dict[str, Any]:
 PROJECTION_SCHEMA = {
     "espn_id": pl.Utf8, "name": pl.Utf8, "position": pl.Utf8, "team": pl.Utf8,
     "week": pl.Int64, "projected_points": pl.Float64, "actual_points": pl.Float64,
+    "season_projected_points": pl.Float64, "season_actual_points": pl.Float64,
+    "season_projected_avg": pl.Float64,
     "injury_status": pl.Utf8, "lineup_slot": pl.Utf8, "on_team_id": pl.Int64,
     "percent_owned": pl.Float64, "source": pl.Utf8,
 }
 """Explicit, for the same reason PLAYER_SCHEMA is: ESPN returns [] rather than
 null for several fields, and polars' inference dies on an all-empty column."""
 
+SEASON_PROJECTION_COLUMNS = {
+    "season_projected_points", "season_actual_points", "season_projected_avg",
+}
+"""Added after the first live in-season run. Used to spot a pre-migration cache."""
+
 SEASON_TOTAL_PERIOD = 0
 """ESPN keys ``Player.stats`` by scoringPeriodId, and 0 is the SEASON total
-rather than a week. Summing the dict naively counts the whole season twice."""
+rather than a week. Summing the dict naively counts the whole season twice.
+
+It is also the ONLY key that exists before ESPN starts publishing weeks, and it
+carries the number the rest-of-season anchor actually wants — see
+``ros.from_espn``. Skipping it as "not a week" was right; never READING it was
+the bug, because it left one published week to stand in for fourteen."""
 
 
 def _projection_rows(players, weeks: tuple[int, ...], source: str) -> list[dict]:
@@ -349,6 +361,12 @@ def _projection_rows(players, weeks: tuple[int, ...], source: str) -> list[dict]
     rows: list[dict] = []
     for p in players:
         stats = getattr(p, "stats", None) or {}
+        # Read stats[0] DIRECTLY rather than via espn_api's
+        # ``projected_total_points``: that attribute is ``.get(0, {}).get(
+        # 'projected_points', 0)``, so a player ESPN has not projected at all
+        # and a player projected at zero both arrive as 0.0. Those are opposite
+        # facts and the whole anchor turns on telling them apart.
+        season = stats.get(SEASON_TOTAL_PERIOD) or {}
         base = {
             "espn_id": str(getattr(p, "playerId", "") or ""),
             "name": _scalar(getattr(p, "name", None)),
@@ -358,6 +376,9 @@ def _projection_rows(players, weeks: tuple[int, ...], source: str) -> list[dict]
             "lineup_slot": _scalar(getattr(p, "lineupSlot", None)),
             "on_team_id": _scalar(getattr(p, "onTeamId", None), int),
             "percent_owned": _scalar(getattr(p, "percent_owned", None), float),
+            "season_projected_points": _scalar(season.get("projected_points"), float),
+            "season_actual_points": _scalar(season.get("points"), float),
+            "season_projected_avg": _scalar(season.get("projected_avg_points"), float),
             "source": source,
         }
         for wk in weeks:
@@ -410,7 +431,23 @@ def player_projections(
             )
         return pl.DataFrame(rows, schema=PROJECTION_SCHEMA)
 
-    return cached("espn_projections", fetch, season=year, source="espn", **kw)
+    df = cached("espn_projections", fetch, season=year, source="espn", **kw)
+    # A parquet written before the season columns existed is not stale by the
+    # TTL and is not wrong — it is INCOMPLETE, which the staleness check cannot
+    # see. Serving it would silently fall back to extrapolating one published
+    # week across fourteen, which is the exact failure the season anchor exists
+    # to remove. Refetch once; offline it cannot, and says so.
+    if SEASON_PROJECTION_COLUMNS - set(df.columns):
+        if kw.get("offline"):
+            raise ESPNUnavailable(
+                "the cached projection table predates the season-projection "
+                "columns and cannot be refreshed offline.\n"
+                "  Fix: run once online — `uv run python -m ff_agent.cli "
+                "monitor --job refresh`."
+            )
+        df = cached("espn_projections", fetch, season=year, source="espn",
+                    **{**kw, "force": True})
+    return df
 
 
 def current_rosters(year: int = SEASON, **kw) -> pl.DataFrame:

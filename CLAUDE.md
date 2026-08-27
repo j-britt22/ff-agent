@@ -483,6 +483,50 @@ docker compose -f docker/compose.yml up -d --build
   fixture with no bench found ZERO trades because every "surplus" player was
   actually a starter. Both zeros were CORRECT for those rosters and neither was
   the case under test. Fixtures now carry real depth.
+- **ESPN PUBLISHES A MEDIAN OF ONE OF FOURTEEN WEEKS, so the rest-of-season
+  anchor cannot be built from the published weeks at all.** Measured on the live
+  league 2026-08-27. Two versions failed on this in opposite directions and both
+  reached the digest. Summing the window and treating unpublished weeks as zero
+  made everyone a fraction of himself, unevenly. Taking the MEAN of the
+  published weeks and extending it fixed the scale and not the substance: a
+  one-week mean is a WEEKLY projection wearing a season's clothes, carrying that
+  week's opponent, snap projection and injury designation, then multiplying all
+  three by fourteen. **Brian Thomas Jr., whom ESPN projected at 0.0 for week 1
+  because he was out, became worth zero for the SEASON** — and therefore the
+  cheapest thing on the roster, so the engine recommended dropping him for a
+  kicker. Resolution: ESPN answers the rest-of-season question DIRECTLY at
+  `scoringPeriodId 0` — a full-season projected total in this league's scoring —
+  and that is the anchor. This is F1's own resolution one level down: match the
+  source to the HORIZON of the question rather than stretching one to cover the
+  other. The per-week numbers are kept as `espn_projection` and serve the weekly
+  lineup call, where they are exactly right. BTJ now prices at 12.4/wk for the
+  season and 0.0 for week 1 — **sit him and do not drop him are opposite calls
+  and the engine has to make both at once.** Rescued players are named in the
+  digest rather than silently corrected.
+- **The season projection is divided by 17 GAMES, never by the 14-week fantasy
+  window.** M7 paid 6.25% for `/16` on the opposite reasoning; `/14` here would
+  inflate every player by 21%. In-season, what is LEFT is `season_projected -
+  season_actual`, which is correct preseason (actual is 0) and in week 9 without
+  a special case — otherwise a player who started hot is projected to score his
+  whole season a second time.
+- **M3's "read literally, every projection is 17x wrong" trap now has a
+  tripwire in its new home.** ESPN ships `appliedAverage` beside `appliedTotal`,
+  so the two readings are compared directly every run: if the season total were
+  secretly a per-game number the ratio would sit near 17 rather than 1. The
+  digest says so loudly instead of pricing a roster on it.
+- **`espn_api`'s `projected_total_points` cannot be used for this.** It is
+  `stats.get(0, {}).get('projected_points', 0)`, so a player ESPN has not
+  projected at all and a player projected at zero both arrive as `0.0`. The
+  whole anchor turns on telling those apart, so `stats[0]` is read directly.
+- **A cache written before the season columns existed is INCOMPLETE, not stale,
+  and the TTL cannot see it.** Serving it would silently fall back to the
+  one-week extrapolation. `player_projections` refetches once when the columns
+  are absent, and refuses offline with the command to run.
+- **A fixture that is not internally consistent measures the fixture.** The
+  wiring fixture sat at week 9 with `season_actual_points = 0.0` beside a
+  17-game projection — "projected for 17 games, scored nothing in 8" — and the
+  anchor correctly answered that all 187 points were still to come, at nearly
+  double the rate. Two tests failed for the right reason.
 
 **`ros.MODEL_WEIGHT` ships at 0.0.** M3's fitted 0.12 was fitted for preseason
 season-long projections scored on rank correlation; carrying it to an in-season

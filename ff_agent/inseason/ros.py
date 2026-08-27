@@ -57,6 +57,12 @@ our model ALONE at 0.687 mean Spearman against consensus's 0.761, so the prior
 that a fitted weight is small is strong and the prior that it is zero is not
 unreasonable."""
 
+GAMES_IN_NFL_SEASON = 17
+"""The NFL plays 18 WEEKS and 17 GAMES — the bye is the eighteenth week, not one
+of the seventeen. M7's ``weekly_scale`` divided by 16 on the opposite reasoning
+and inflated every player by 6.25%; a test had pinned the wrong answer, which is
+why it survived. ESPN's season projection spans all 17."""
+
 MIN_GAMES_FOR_USAGE = 4
 """Below this, current-season usage is noise wearing a decimal point.
 
@@ -252,6 +258,7 @@ NUMERIC_SCHEMA = {
     "anchor_points": pl.Float64, "model_points": pl.Float64,
     "sack_correction": pl.Float64, "kicker_correction": pl.Float64,
     "games_remaining": pl.Int64, "bye_week": pl.Int64,
+    "espn_projection": pl.Float64,
 }
 """Pinned dtypes, because the engines CONCATENATE constantly.
 
@@ -360,22 +367,44 @@ def from_espn(
             f"have published them yet, which is not the same as projecting zero."
         )
 
-    # ESPN PUBLISHES ONLY THE WEEKS IT HAS PROJECTED — often just the upcoming
-    # one. Summing the window and treating unpublished weeks as ZERO made every
-    # player roughly 1/14th of himself, and unevenly so.
+    # ─────────────────────────────────────────────────────────────────────
+    # WHY THE ANCHOR IS THE SEASON PROJECTION AND NOT THE PUBLISHED WEEKS
     #
-    # NULL and 0.0 are different facts and must be treated differently. A null
-    # week is one ESPN has not published. A published 0.0 is real information:
-    # it is what ESPN says about a player who is injured, suspended or out. An
-    # earlier version required `> 0`, which threw the second away — so a player
-    # ESPN had projected at zero looked UNPRICED, got dropped from the frame,
-    # was silently filled with 0.0 downstream, and became the most attractive
-    # thing on the roster to cut. It recommended dropping Brian Thomas Jr. for a
-    # kicker.
+    # ESPN publishes per-week projections only for weeks it has actually
+    # projected — in practice the upcoming one. Measured on this league at week
+    # 1 of 2026: the MEDIAN player had 1 of 14 remaining weeks published.
+    #
+    # Two earlier versions both failed on that, in opposite directions:
+    #
+    #   1. Summing the window and treating unpublished weeks as ZERO made every
+    #      player roughly 1/14th of himself, and unevenly so.
+    #   2. Taking the MEAN of the published weeks and extending it fixed the
+    #      scale but not the substance, because a one-week mean is a WEEKLY
+    #      projection wearing a season's clothes. It carries that week's
+    #      opponent, that week's snap projection and that week's injury
+    #      designation — and then multiplies all three by fourteen. A starting
+    #      receiver ESPN had projected at 0.0 for week 1 because he was out
+    #      became a player worth zero for the SEASON, and therefore the cheapest
+    #      thing on the roster to cut. It recommended dropping Brian Thomas Jr.
+    #      for a kicker.
+    #
+    # ESPN answers the rest-of-season question directly, at scoring period 0:
+    # a full-season projected total in this league's scoring. That is the
+    # anchor. The per-week numbers are kept — as ``espn_projection``, this
+    # week's number — and belong to the WEEKLY jobs, where they are exactly
+    # right. This is F1's own resolution applied one level down: match the
+    # source to the horizon of the question instead of stretching one to cover
+    # the other.
+    #
+    # NULL and 0.0 remain different facts at both horizons. A null is a week or
+    # a season ESPN has not published; a published 0.0 is what ESPN says about a
+    # player who is out. The first must never be filled, the second must never
+    # be discarded.
     #
     # The bye week is excluded from the RATE rather than counted as a zero,
-    # because games_remaining already excludes it below — counting it in both
-    # places would charge for the same bye twice.
+    # because games_remaining already excludes it — counting it in both places
+    # would charge for the same bye twice.
+    # ─────────────────────────────────────────────────────────────────────
     n_weeks = len(weeks)
     if byes is not None and "bye_week" in byes.columns:
         ahead = ahead.join(byes.select("team", "bye_week"), on="team", how="left")
@@ -384,25 +413,67 @@ def from_espn(
 
     on_bye = pl.col("bye_week").is_not_null() & (pl.col("week") == pl.col("bye_week"))
     scored = pl.col("projected_points").is_not_null() & ~on_bye
+    this_week = pl.col("week") == from_week
+
+    have_season = "season_projected_points" in ahead.columns
+    season_aggs = [
+        pl.col("season_projected_points").first().alias("season_projected"),
+        pl.col("season_actual_points").first().alias("season_actual"),
+        pl.col("season_projected_avg").first().alias("season_avg"),
+    ] if have_season else []
+
     agg = ahead.group_by("canonical_id").agg(
         pl.col("position").first(),
         pl.col("team").first(),
         pl.col("bye_week").first(),
         pl.col("name").first() if "name" in ahead.columns else pl.lit(None).alias("name"),
-        pl.col("projected_points").filter(scored).mean().alias("_rate"),
+        pl.col("projected_points").filter(scored).mean().alias("_week_rate"),
         pl.col("projected_points").filter(scored).len().alias("weeks_projected"),
+        pl.col("projected_points").filter(this_week).first().alias("espn_projection"),
+        *season_aggs,
     )
+    if not have_season:
+        agg = agg.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("season_projected"),
+            pl.lit(None, dtype=pl.Float64).alias("season_actual"),
+            pl.lit(None, dtype=pl.Float64).alias("season_avg"),
+        )
 
     notes: list[str] = []
+
+    # ESPN's season projection covers the NFL's 17 GAMES over 18 weeks, so the
+    # rate it implies is divided by games left in the NFL season — not by
+    # `games_remaining`, which is my fantasy window (weeks `from_week`..14) and
+    # is what the rate is multiplied BY on the next line. Conflating the two
+    # would inflate every rate by the ratio of the windows.
+    elapsed = max(from_week - 1, 0)
     agg = agg.with_columns(
+        pl.when(pl.col("bye_week").is_not_null() & (pl.col("bye_week") < from_week))
+        .then(pl.lit(elapsed - 1)).otherwise(pl.lit(elapsed))
+        .clip(lower_bound=0).alias("_nfl_games_played")
+    ).with_columns(
+        (GAMES_IN_NFL_SEASON - pl.col("_nfl_games_played"))
+        .clip(lower_bound=1).alias("_nfl_games_left"),
         (
             n_weeks
             - pl.when(pl.col("bye_week").is_in(list(weeks))).then(1).otherwise(0)
-        ).cast(pl.Int64).alias("games_remaining")
+        ).cast(pl.Int64).alias("games_remaining"),
     ).with_columns(
-        (pl.col("_rate").fill_null(0.0) * pl.col("games_remaining"))
-        .round(2).alias("ros_points")
-    ).drop("_rate")
+        # What ESPN says is LEFT: the full-season projection minus what has
+        # already been scored. Preseason that is the whole projection; in week 9
+        # it is weeks 9-18. Correct in both regimes without a special case.
+        (
+            (pl.col("season_projected") - pl.col("season_actual").fill_null(0.0))
+            .clip(lower_bound=0.0) / pl.col("_nfl_games_left")
+        ).alias("_season_rate")
+    ).with_columns(
+        pl.coalesce(pl.col("_season_rate"), pl.col("_week_rate")).alias("_rate"),
+        pl.when(pl.col("_season_rate").is_not_null()).then(pl.lit("season"))
+        .when(pl.col("_week_rate").is_not_null()).then(pl.lit("week"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8)).alias("anchor_source"),
+    ).with_columns(
+        (pl.col("_rate") * pl.col("games_remaining")).round(2).alias("ros_points")
+    )
 
     if soe is not None and "sacks_over_expected_per_game" in soe.columns:
         agg = agg.join(
@@ -425,31 +496,88 @@ def from_espn(
             f"dropped rather than divided by zero."
         )
 
+    if not have_season:
+        notes.append(
+            "the projection table predates the season-projection columns, so "
+            "rest-of-season value is one published week extended over the "
+            "season. That is a WEEKLY number doing a season's job — refresh "
+            "before trusting any drop it suggests."
+        )
+
+    # M3's "read literally, every projection is 17x wrong" trap, checked in the
+    # new place rather than assumed absent. ESPN ships appliedAverage beside
+    # appliedTotal, so the two readings can be compared directly: if the season
+    # total were secretly a per-game number the ratio would sit near 17, not 1.
+    check = agg.filter(
+        pl.col("season_projected").is_not_null()
+        & pl.col("season_avg").is_not_null()
+        & (pl.col("season_projected") > 20.0)
+        & (pl.col("season_avg") > 0.0)
+    )
+    if check.height:
+        ratio = float(
+            (check["season_projected"] / GAMES_IN_NFL_SEASON / check["season_avg"])
+            .median() or 0.0
+        )
+        if not 0.7 <= ratio <= 1.4:
+            notes.append(
+                f"ESPN's season total / {GAMES_IN_NFL_SEASON} is {ratio:.2f}x its "
+                f"own per-game average, which should be about 1.0. One of the two "
+                f"is not what it claims to be (M3 found exactly this on the "
+                f"yardage fields). Treat every rest-of-season number below as "
+                f"suspect until it is resolved."
+            )
+
     # Coverage is stated, because "ESPN has projected one of fourteen weeks" and
     # "this player is projected to score very little" look identical in a total.
     covered = agg.filter(pl.col("weeks_projected") > 0)
-    if covered.is_empty():
+    median_cov = int(covered["weeks_projected"].median() or 0) if covered.height else 0
+    if median_cov < n_weeks:
+        notes.append(
+            f"ESPN has published per-week projections for a median of "
+            f"{median_cov} of the {n_weeks} remaining weeks, so those serve the "
+            f"WEEKLY lineup call only. Rest-of-season value comes from ESPN's "
+            f"season projection instead — a one-week number extended over "
+            f"fourteen carries that week's matchup and injury with it."
+        )
+
+    # The players the change actually rescues, named. A season anchor above
+    # replacement paired with a weekly rate at nothing is the Brian Thomas Jr.
+    # shape: out this week, fine for the season, and previously worth zero.
+    rescued = agg.filter(
+        (pl.col("anchor_source") == "season")
+        & pl.col("_week_rate").is_not_null()
+        & (pl.col("_week_rate") <= 1.0)
+        & (pl.col("_rate") >= 5.0)
+    ).sort("_rate", descending=True)
+    if rescued.height:
+        who = ", ".join(
+            f"{r['name'] or r['canonical_id']} ({r['_rate']:.1f}/wk)"
+            for r in rescued.head(5).iter_rows(named=True)
+        )
+        notes.append(
+            f"{rescued.height} player(s) are projected at ~0 for week {from_week} "
+            f"but well above that for the season: {who}"
+            + ("..." if rescued.height > 5 else "")
+            + ". They are priced on the season, not on this week — sit them, do "
+            f"not drop them."
+        )
+
+    blank = agg.filter(pl.col("anchor_source").is_null())
+    if blank.height:
+        agg = agg.filter(pl.col("anchor_source").is_not_null())
+        notes.append(
+            f"{blank.height} player(s) have no projection at all, weekly or "
+            f"season, and were dropped rather than priced at zero."
+        )
+    if agg.is_empty():
         raise ROSError(
-            f"ESPN has published no per-week projections for weeks "
+            f"ESPN has published no projections at all for weeks "
             f"{weeks[0]}-{weeks[-1]}. Refusing to price a roster at zero — that "
             f"is not the same as projecting zero."
         )
-    median_cov = int(covered["weeks_projected"].median() or 0)
-    if median_cov < n_weeks:
-        notes.append(
-            f"ESPN has published projections for a median of {median_cov} of the "
-            f"{n_weeks} remaining weeks. Rest-of-season value is that per-game "
-            f"rate extended over each player's remaining games, not a sum of "
-            f"published weeks — otherwise everyone reads as a fraction of "
-            f"himself and unevenly so."
-        )
-    blank = agg.filter(pl.col("weeks_projected") == 0)
-    if blank.height:
-        agg = covered
-        notes.append(
-            f"{blank.height} player(s) have no published projection at all and "
-            f"were dropped rather than priced at zero."
-        )
+    agg = agg.drop("_week_rate", "_season_rate", "_rate",
+                   "_nfl_games_played", "_nfl_games_left")
 
     out = build(agg, from_week=from_week, weight=weight, season=season)
     out.notes = notes + out.notes

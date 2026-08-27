@@ -387,6 +387,7 @@ def with_values(
     cols = [c for c in (
         "ros_points", "weekly_points", "anchor_points", "anchor_weekly",
         "sack_correction", "kicker_correction", "games_remaining",
+        "espn_projection",
     ) if c in ros_frame.columns]
     out = frame.join(
         ros_frame.select("canonical_id", *cols), on="canonical_id", how="left"
@@ -420,6 +421,7 @@ ENGINE_COLUMNS = (
     "canonical_id", "name", "position", "team", "weekly_points", "ros_points",
     "bye_week", "anchor_points", "anchor_weekly", "sack_correction",
     "kicker_correction", "games_remaining", "lineup_slot", "priced",
+    "espn_projection",
 )
 """Exactly what a roster row and a free-agent row must BOTH carry.
 
@@ -465,4 +467,5 @@ _ENGINE_DTYPES = {
     "anchor_weekly": pl.Float64, "sack_correction": pl.Float64,
     "kicker_correction": pl.Float64, "games_remaining": pl.Int64,
     "lineup_slot": pl.Utf8, "priced": pl.Boolean,
+    "espn_projection": pl.Float64,
 }

@@ -307,6 +307,28 @@ class LineupPlan:
         }
 
 
+def this_week_value(roster: pl.DataFrame) -> pl.DataFrame:
+    """Swap the rest-of-season rate for THIS WEEK's published projection.
+
+    The two are different questions and the monitor asks both. "Who is worth
+    more for the rest of the season" (waivers, trades) is answered by ESPN's
+    season projection spread over the remaining games. "Who do I start on
+    Sunday" is answered by ESPN's projection FOR SUNDAY, which carries this
+    week's opponent, snap projection and injury designation — the very things
+    that make it wrong as a season number and right as a weekly one.
+
+    ``ros.from_espn`` keeps both, so this is a column swap rather than a second
+    fetch. Falls back to the season rate for anyone ESPN has not published a
+    weekly number for, which is most of the free-agent tail.
+    """
+    if "espn_projection" not in roster.columns:
+        return roster
+    return roster.with_columns(
+        pl.coalesce(pl.col("espn_projection"), pl.col("weekly_points"))
+        .alias("weekly_points")
+    )
+
+
 def build(
     roster: pl.DataFrame,
     week: int,
@@ -325,7 +347,7 @@ def build(
     now = now or CK.now_et()
     CK.assert_not_my_bye(week)
 
-    r = attach_locks(roster, week, kickoffs, now)
+    r = attach_locks(this_week_value(roster), week, kickoffs, now)
     r = AV.attach(r, injuries)
     pins = pins_from_espn(r)
 

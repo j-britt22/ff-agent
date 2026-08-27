@@ -16,6 +16,7 @@ import pytest
 
 from ff_agent.inseason import builders as B
 from ff_agent.inseason import clock as CK
+from ff_agent.inseason import lineup as LN
 from ff_agent.inseason import ros as ROS
 from ff_agent.inseason import state as ST
 
@@ -134,7 +135,23 @@ def espn(monkeypatch):
                 "espn_id": cid, "name": name, "position": pos, "team": nfl,
                 "week": wk, "projected_points": 0.0 if wk == bye else PTS[cid],
                 "actual_points": None, "injury_status": None, "lineup_slot": None,
-                "on_team_id": None, "percent_owned": 50.0, "source": "x"})
+                "on_team_id": None, "percent_owned": 50.0, "source": "x",
+                # The SEASON projection is the rest-of-season anchor and the
+                # per-week numbers serve the weekly call. The fixture carries
+                # both, or every wiring test here would exercise the fallback
+                # branch instead of the shipped one. 17 games, so the implied
+                # rate is PTS[cid] and every expectation below is unchanged.
+                "season_projected_points": PTS[cid] * 17,
+                # Consistent with WEEK: this player has already banked the games
+                # he has played. An earlier version left this at 0.0 while the
+                # fixture sat at week 9, which said "projected for 17 games,
+                # scored nothing in 8" — and the anchor correctly answered that
+                # the remaining 187 points were all still to come, at nearly
+                # double the rate. A fixture that is not internally consistent
+                # measures the fixture.
+                "season_actual_points":
+                    PTS[cid] * ((WEEK - 1) - (1 if bye and bye < WEEK else 0)),
+                "season_projected_avg": PTS[cid]})
     projections = pl.DataFrame(proj_rows)
 
     completed = pl.DataFrame([
@@ -250,7 +267,10 @@ def test_a_stale_results_gap_blocks_the_digest(espn, monkeypatch):
 
 
 # ─── ros.from_espn ──────────────────────────────────────────────────────────
-def test_ros_sums_espn_per_week_projections(loaded):
+def test_ros_extends_espns_season_projection_over_the_window(loaded):
+    """Rest-of-season value is ESPN's SEASON projection spread over the games
+    that are left, not the published weeks summed — see the block at the foot of
+    this file for why the second reading was dangerous."""
     _, ros = loaded
     row = ros.filter(pl.col("canonical_id") == "q1")
     assert row["anchor_points"][0] == pytest.approx(22.0 * 6)   # weeks 9-14
@@ -640,7 +660,7 @@ def test_a_player_with_no_projection_is_dropped_not_priced_at_zero(loaded):
               "week": wk, "projected_points": None} for wk in range(1, 15)]
     out = ROS.from_espn(pl.DataFrame(rows), from_week=1, season=2026)
     assert "blank" not in out.frame["canonical_id"].to_list()
-    assert any("no published projection" in n for n in out.notes)
+    assert any("no projection at all" in n for n in out.notes)
 
 
 def test_no_projections_at_all_is_refused_not_priced_at_zero(loaded):
@@ -768,3 +788,129 @@ def test_the_digest_names_unpriced_roster_players(loaded):
     d, _ = B.waivers_digest(st, thinned, n_sims=400)
     assert any("NO PROJECTION" in n for n in d.notes)
     assert any("My WR1" in n for n in d.notes)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The rest-of-season anchor is ESPN's SEASON projection, not one published week
+#
+# Found on the first live in-season run, twice. The first version summed the
+# remaining weeks and treated unpublished ones as zero, so everyone read as a
+# fraction of himself. The second took the mean of the published weeks and
+# extended it, which fixed the scale and not the substance: with a median of ONE
+# of fourteen weeks published, a "rest-of-season" number was this week's
+# projection multiplied by fourteen — this week's opponent, this week's snap
+# count and this week's injury designation included. A starting receiver ESPN
+# had projected at 0.0 for week 1 because he was out became worth zero for the
+# SEASON, and therefore the cheapest thing on the roster to cut.
+# ─────────────────────────────────────────────────────────────────────────────
+def _proj_rows(cid, name, pos, team, week_one, season_proj, weeks=range(1, 15)):
+    return [{
+        "canonical_id": cid, "name": name, "position": pos, "team": team,
+        "week": wk,
+        "projected_points": (week_one if wk == 1 else None),
+        "season_projected_points": season_proj,
+        "season_actual_points": 0.0,
+        "season_projected_avg": (season_proj / 17 if season_proj is not None else None),
+    } for wk in weeks]
+
+
+def _one_week_league():
+    """ESPN as it actually is at week 1: one week published, seasons for all."""
+    rows = []
+    rows += _proj_rows("out_wr", "Brian Thomas Jr.", "WR", "SF", 0.0, 210.0)
+    rows += _proj_rows("qb1", "Justin Herbert", "QB", "KC", 20.6, 350.0)
+    rows += _proj_rows("kicker", "Chris Boswell", "K", "SF", 8.5, 140.0)
+    return pl.DataFrame(rows)
+
+
+def test_a_week_one_zero_does_not_write_off_the_season():
+    """The Brian Thomas Jr. bug, pinned by name.
+
+    ESPN says 0.0 for week 1 (he is out) and 210 for the season. Those are both
+    true and they answer different questions. Pricing the season off the week
+    made him worth nothing and offered him as a drop for a kicker.
+    """
+    out = ROS.from_espn(_one_week_league(), from_week=1, season=2026)
+    row = out.frame.filter(pl.col("canonical_id") == "out_wr").to_dicts()[0]
+
+    assert row["anchor_source"] == "season"
+    # 210 over 17 NFL games, extended across the 14-week fantasy window.
+    assert row["weekly_points"] == pytest.approx(210 / 17, abs=0.01)
+    # And he is worth more than the kicker, which is the whole point.
+    kick = out.frame.filter(pl.col("canonical_id") == "kicker").to_dicts()[0]
+    assert row["weekly_points"] > kick["weekly_points"]
+
+
+def test_the_rescued_players_are_named_in_the_digest():
+    out = ROS.from_espn(_one_week_league(), from_week=1, season=2026)
+    assert any("Brian Thomas Jr." in n for n in out.notes), out.notes
+
+
+def test_this_weeks_projection_is_kept_for_the_weekly_call():
+    """Both numbers survive: the season one prices him, the weekly one starts him.
+
+    Dropping him and benching him are opposite calls and the engine has to be
+    able to make them at the same time.
+    """
+    out = ROS.from_espn(_one_week_league(), from_week=1, season=2026)
+    row = out.frame.filter(pl.col("canonical_id") == "out_wr").to_dicts()[0]
+    assert row["espn_projection"] == 0.0
+    swapped = LN.this_week_value(out.frame)
+    got = swapped.filter(pl.col("canonical_id") == "out_wr")["weekly_points"][0]
+    assert got == 0.0
+    # ...while the free-agent tail, which has no weekly number at all, keeps its
+    # season rate rather than falling to zero.
+    tail = ROS.from_espn(
+        pl.DataFrame(_proj_rows("tail", "Deep Guy", "WR", "SF", None, 40.0)),
+        from_week=1, season=2026)
+    assert LN.this_week_value(tail.frame)["weekly_points"][0] > 0
+
+
+def test_the_season_rate_is_divided_by_nfl_games_not_fantasy_weeks():
+    """17 games, not the 14-week fantasy window.
+
+    M7 paid 6.25% for dividing by 16 on the opposite reasoning. Dividing a
+    17-game projection by a 14-week window inflates every player by 21%.
+    """
+    out = ROS.from_espn(
+        pl.DataFrame(_proj_rows("p", "P", "RB", "SF", 10.0, 170.0)),
+        from_week=1, season=2026)
+    assert out.frame["weekly_points"][0] == pytest.approx(10.0, abs=0.01)
+
+
+def test_points_already_scored_are_not_projected_again():
+    """In week 9 the season projection still spans weeks 1-18. What is LEFT is
+    the projection minus what is already banked, or a player who started hot is
+    projected to score his whole season all over again."""
+    rows = _proj_rows("p", "P", "RB", "SF", 10.0, 170.0, weeks=range(9, 15))
+    for r in rows:
+        r["season_actual_points"] = 100.0
+    out = ROS.from_espn(pl.DataFrame(rows), from_week=9, season=2026)
+    # 70 points left over 9 remaining NFL games.
+    assert out.frame["weekly_points"][0] == pytest.approx(70 / 9, abs=0.01)
+
+
+def test_a_seventeen_times_disagreement_is_reported_not_absorbed():
+    """M3's "read literally, every projection is 17x wrong" trap, in its new home.
+
+    ESPN ships appliedAverage beside appliedTotal, so if the total were secretly
+    a per-game number the ratio would sit near 17. That has to be loud: every
+    rest-of-season number in the digest depends on which one it is.
+    """
+    rows = _proj_rows("p", "P", "RB", "SF", 10.0, 170.0)
+    for r in rows:
+        r["season_projected_avg"] = 170.0  # as if the total were per-game
+    out = ROS.from_espn(pl.DataFrame(rows), from_week=1, season=2026)
+    assert any("per-game average" in n for n in out.notes), out.notes
+
+
+def test_a_pre_migration_table_still_works_and_says_so():
+    """A cache written before the season columns existed is incomplete, not
+    stale — the TTL cannot see it. It still produces a board; it says loudly
+    that the board is one week doing a season's job."""
+    rows = [{"canonical_id": "p", "name": "P", "position": "RB", "team": "SF",
+             "week": wk, "projected_points": (10.0 if wk == 1 else None)}
+            for wk in range(1, 15)]
+    out = ROS.from_espn(pl.DataFrame(rows), from_week=1, season=2026)
+    assert out.frame["anchor_source"][0] == "week"
+    assert any("predates the season-projection columns" in n for n in out.notes)
