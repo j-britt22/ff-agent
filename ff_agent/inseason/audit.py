@@ -153,3 +153,86 @@ def audit_week(
         claims=score_claims(claims, control, actuals),
         lineup=lineup, clears=clears, notes=notes,
     )
+
+
+# ─── The control, rebuilt from the transaction log (F4) ──────────────────────
+def most_added(transactions: pl.DataFrame, week: int) -> str | None:
+    """The player the league added most that week — the control.
+
+    F4 forced this: ``player_owned_espn`` is null in-season, so the obvious
+    "trending adds" baseline is not available historically. Rebuilding it from
+    the transaction log is strictly better anyway — it is not a proxy for what
+    the other eight managers did, it IS what they did.
+    """
+    if transactions is None or transactions.is_empty():
+        return None
+    adds = transactions.filter(
+        pl.col("action").str.contains("ADD", literal=False)
+        & pl.col("espn_id").is_not_null()
+    )
+    if adds.is_empty():
+        return None
+    return (
+        adds.group_by("espn_id").len().sort("len", descending=True)
+        ["espn_id"][0]
+    )
+
+
+def audit_season(
+    season: int,
+    through_week: int,
+    actuals_by_week: dict[int, pl.DataFrame] | None = None,
+    controls_by_week: dict[int, str | None] | None = None,
+) -> pl.DataFrame:
+    """Score every logged week against its control. §11 step 10, run weekly.
+
+    Reports UNMEASURED rather than passing quietly when a week has no control —
+    M7's precedent is that most apparent edge is not real, so a number with no
+    control beside it should not be believed.
+    """
+    rows = []
+    for wk in range(1, through_week + 1):
+        actuals = (actuals_by_week or {}).get(wk)
+        ctrl_id = (controls_by_week or {}).get(wk)
+        control = (
+            pl.DataFrame({"week": [wk], "canonical_id": [ctrl_id]})
+            if ctrl_id else None
+        )
+        a = audit_week(wk, actuals if actuals is not None else pl.DataFrame(
+            schema={"canonical_id": pl.Utf8, "points": pl.Float64}),
+            control=control, season=season)
+        sb = a.scoreboard()
+        rows.append({
+            "week": wk,
+            "claims_scored": sb["claims_scored"],
+            "edge_vs_control": sb["mean_claim_edge_vs_control"],
+            "points_left_on_bench": sb["lineup_points_left_on_bench"],
+            "clear_accuracy": sb["clear_prediction_accuracy"],
+            "measured": sb["mean_claim_edge_vs_control"] is not None,
+        })
+    if not rows:
+        return pl.DataFrame(schema={"week": pl.Int64, "measured": pl.Boolean})
+    return pl.DataFrame(rows)
+
+
+def season_verdict(scored: pl.DataFrame) -> str:
+    """The honest one-line summary. Says UNMEASURED when it is."""
+    if scored.is_empty():
+        return "nothing logged yet — the season teaches you nothing without it (§10)."
+    measured = scored.filter(pl.col("measured"))
+    if measured.is_empty():
+        return (
+            "UNMEASURED: recommendations were logged but no control was "
+            "available for any week, so none of them can be scored. M7 measured "
+            "a zero-edge policy at +29.9 weekly points against the full model's "
+            "+32.1 — without a control the whole thing gets banked as skill."
+        )
+    edge = measured["edge_vs_control"].mean()
+    verdict = "BEATS the control" if edge and edge > 0 else "LOSES to the control"
+    return (
+        f"{measured.height} week(s) measured · mean claim edge {edge:+.2f} pts "
+        f"vs the most-added player · {verdict}. "
+        + ("" if edge and edge > 0 else
+           "If this holds, ship the control and say so — that is what M3b did "
+           "with xFP rather than tuning the failure away.")
+    )

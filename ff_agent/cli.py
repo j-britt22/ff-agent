@@ -978,36 +978,75 @@ def cmd_monitor(args) -> int:
 
     dispatch = {
         "waivers": cmd_waivers, "trades": cmd_trades, "week14": cmd_week14,
-        "lineup": cmd_lineup,
+        "lineup": cmd_lineup, "freeagents": cmd_freeagents,
+        "injuries": cmd_injuries, "refresh": cmd_refresh, "audit": cmd_audit,
     }
     if args.job in dispatch:
         if not hasattr(args, "week"):
             args.week = None
         return dispatch[args.job](args)
-    if args.job in ("refresh", "freeagents", "injuries"):
-        return _refresh(args, args.job)
-    print(f"job {args.job!r} has no builder yet.")
+    print(f"job {args.job!r} has no builder — this is a bug, not a stub.")
     return 1
 
 
-def _refresh(args, job: str) -> int:
-    """Pull fresh data and report what moved. No digest unless it fails."""
+def cmd_freeagents(args) -> int:
+    """§9.3's Wednesday sweep: who actually cleared, at zero priority cost."""
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import builders as B
+
+    def build(st, ros):
+        added = None
+        try:
+            txns = ESPN.transactions(SEASON, st.week)
+            if txns.height:
+                added = set(
+                    txns.filter(
+                        pl.col("action").str.contains("ADD", literal=False)
+                        & pl.col("espn_id").is_not_null()
+                    )["espn_id"].to_list()
+                )
+        except Exception:
+            pass
+        return B.freeagents_digest(st, ros, added_ids=added)
+
+    return _run_job(args, "freeagents", build)
+
+
+def cmd_injuries(args) -> int:
+    """§9.1's Saturday job: flag every Q/D with F10's measured rates."""
+    from ff_agent.data import nflverse as NV
+    from ff_agent.inseason import builders as B
+
+    def build(st, ros):
+        try:
+            inj = NV.injuries(SEASON)
+        except Exception:
+            inj = None
+        return B.injuries_digest(st, ros, injuries=inj)
+
+    return _run_job(args, "injuries", build)
+
+
+def cmd_refresh(args) -> int:
+    """Tuesday's ingest plus F2's scoring tripwire. Silent when clean."""
     from ff_agent.data import espn as ESPN
     from ff_agent.data import nflverse as NV
     from ff_agent.data.espn import ESPNAuthError, ESPNUnavailable
+    from ff_agent.inseason import builders as B
 
     try:
-        rosters = ESPN.current_rosters(SEASON, force=True)
-        proj = ESPN.player_projections(SEASON, force=True)
-        results = ESPN.weekly_results(SEASON, force=True)
-        NV.injuries(SEASON, force=True)
+        ESPN.current_rosters(SEASON, force=True)
+        ESPN.player_projections(SEASON, force=True)
+        ESPN.weekly_results(SEASON, force=True)
+        try:
+            NV.injuries(SEASON, force=True)
+        except Exception as exc:
+            print(f"injury report not refreshed ({type(exc).__name__}) — the "
+                  f"Saturday job will say so rather than assume everyone is fit.")
     except (ESPNAuthError, ESPNUnavailable) as exc:
         print(exc)
         return 1
-    weeks = sorted(results["week"].unique().to_list()) if results.height else []
-    print(f"refreshed: {rosters.height} rostered · {proj.height} projection rows · "
-          f"{len(weeks)} completed week(s) {weeks}")
-    return 0
+    return _run_job(args, "refresh", B.refresh_digest)
 
 
 def _tick(args) -> int:
@@ -1072,8 +1111,15 @@ def _load_state_and_ros(args, week=None):
     resolved, _bad = ST.resolve_long(proj, "projections")
     from ff_agent.data import byes as BY
     byes = BY.bye_weeks(SEASON).select("team", pl.col("bye_week").cast(pl.Int64))
-    ros = ROS.from_espn(resolved, from_week=st.week, byes=byes, season=SEASON)
-    return st, ros.frame, ros.notes
+    # §3.3's sack term, live. Dark until a few games exist, and it says so
+    # rather than pricing every quarterback as league-average.
+    soe, soe_note = ROS.live_sacks_over_expected(SEASON)
+    ros = ROS.from_espn(resolved, from_week=st.week, byes=byes, soe=soe,
+                        season=SEASON)
+    notes = list(ros.notes)
+    if soe_note:
+        notes.insert(0, soe_note)
+    return st, ros.frame, notes
 
 
 def _run_job(args, job: str, build, week=None, unconditional=False) -> int:
@@ -1146,8 +1192,25 @@ def cmd_week14(args) -> int:
     return _run_job(args, "week14", B.week14_digest, week=14, unconditional=True)
 
 
+def cmd_inseason(args) -> int:
+    """M10b's gate — the 2025 replay, against controls."""
+    from ff_agent.inseason import backtest as BT
+
+    if not args.backtest:
+        print("nothing to do; pass --backtest to run the gate.")
+        return 0
+    res = BT.run_live(season=args.season)
+    print(res.report())
+    return 0 if res.passed else 1
+
+
 def cmd_audit(args) -> int:
+    """§11 step 10, run continuously rather than once in January."""
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import audit as AU
+    from ff_agent.inseason import clock as CK
     from ff_agent.inseason import log as LOG
+
     recs = LOG.read(SEASON)
     print(f"{len(recs)} logged records for {SEASON}")
     if not recs:
@@ -1158,7 +1221,34 @@ def cmd_audit(args) -> int:
         kinds[r.get("kind")] = kinds.get(r.get("kind"), 0) + 1
     for k, n in sorted(kinds.items()):
         print(f"  {k:12s} {n}")
+
+    week = args.week or CK.current_week(SEASON) or 1
+    through = max(1, week - 1)
+
+    # The control (F4): the most-added player across the league that week.
+    controls, actuals = {}, {}
+    for wk in range(1, through + 1):
+        try:
+            controls[wk] = AU.most_added(ESPN.transactions(SEASON, wk), wk)
+        except Exception:
+            controls[wk] = None
+        try:
+            box = ESPN.started_lineup(SEASON, wk)
+            actuals[wk] = box.select(
+                pl.col("espn_id").alias("canonical_id"),
+                pl.col("points"))
+        except Exception:
+            pass
+
+    scored = AU.audit_season(SEASON, through, actuals, controls)
+    if scored.height:
+        with WIDE:
+            print()
+            print(scored)
+    print()
+    print(AU.season_verdict(scored))
     return 0
+
 
 
 def main(argv=None) -> int:
@@ -1260,12 +1350,20 @@ def main(argv=None) -> int:
     p.set_defaults(fn=cmd_lineup)
 
     for name, fn in (("waivers", cmd_waivers), ("trades", cmd_trades),
-                     ("week14", cmd_week14)):
+                     ("week14", cmd_week14), ("freeagents", cmd_freeagents),
+                     ("injuries", cmd_injuries), ("refresh", cmd_refresh)):
         p = sub.add_parser(name)
         p.add_argument("--dry-run", action="store_true")
         p.set_defaults(fn=fn)
 
-    sub.add_parser("audit").set_defaults(fn=cmd_audit)
+    p = sub.add_parser("audit")
+    p.add_argument("--week", type=int)
+    p.set_defaults(fn=cmd_audit)
+
+    p = sub.add_parser("inseason")
+    p.add_argument("--backtest", action="store_true")
+    p.add_argument("--season", type=int, default=2025)
+    p.set_defaults(fn=cmd_inseason)
     args = ap.parse_args(argv)
     return args.fn(args)
 

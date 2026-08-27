@@ -559,3 +559,39 @@ def transactions(year: int, scoring_period: int | None = None) -> pl.DataFrame:
             "scoring_period": pl.Int64, "fantasy_team": pl.Utf8,
             "action": pl.Utf8, "espn_id": pl.Utf8, "name": pl.Utf8})
     return pl.DataFrame(rows)
+
+
+def roster_week(year: int, week: int) -> pl.DataFrame:
+    """Every team's roster AS OF a past week — F3's reconstruction.
+
+    ``load_roster_week`` re-requests ``mRoster`` with a ``scoringPeriodId`` and
+    mutates the League in place, which is why this returns a fresh frame rather
+    than a view: calling it twice with different weeks would otherwise silently
+    change what an earlier result meant.
+
+    This is what makes the §11 step 10 gate possible at all. ESPN does not
+    retain "who was a free agent in week 6", but week W's pool is exactly the
+    draftable universe minus the union of week-W rosters.
+    """
+    lg = get_league(year)
+    try:
+        lg.load_roster_week(week)
+    except Exception as exc:
+        raise ESPNUnavailable(
+            f"load_roster_week({week}) failed for {year}: {exc}"
+        ) from exc
+    rows = []
+    for t in getattr(lg, "teams", []) or []:
+        for p in getattr(t, "roster", []) or []:
+            rows.append({
+                "week": week,
+                "team_id": getattr(t, "team_id", None),
+                "fantasy_team": normalize_team_name(getattr(t, "team_name", None)),
+                "espn_id": str(getattr(p, "playerId", "") or ""),
+                "name": _scalar(getattr(p, "name", None)),
+                "position": _scalar(getattr(p, "position", None)),
+                "team": _scalar(getattr(p, "proTeam", None)),
+            })
+    if not rows:
+        raise ESPNUnavailable(f"No week-{week} rosters for {year}.")
+    return pl.DataFrame(rows)

@@ -450,3 +450,137 @@ def test_the_collision_report_lists_each_player_once(monkeypatch):
     with pytest.raises(ST.StateError) as exc:
         ST.resolve(merged.drop("canonical_id", "match_method"), "test")
     assert str(exc.value).count("Player A") == 1
+
+
+# ─── the four jobs that used to share one generic stub ──────────────────────
+def test_freeagents_names_who_cleared(loaded, tmp_path, monkeypatch):
+    """§9.3 asks the tool to say 'this one will clear — grab him Wednesday'.
+    Tuesday makes the prediction; this is the half that CHECKS it."""
+    from ff_agent.inseason import log as LOG
+    monkeypatch.setattr(LOG, "log_path", lambda season=2026: tmp_path / "l.jsonl")
+    st, ros = loaded
+    LOG.write("waivers", season=2026, week=WEEK,
+              decision={"claims": ["fa1"], "grabs": ["fa2"]})
+    d, fp = B.freeagents_digest(st, ros, added_ids=set())
+    assert "fa2" in fp["cleared"]
+    body = "\n".join(ln for _t, lines in d.sections for ln in lines)
+    assert "Bye-14 RB" in body
+    assert any("accuracy" in n for n in d.notes)
+
+
+def test_freeagents_reports_a_wrong_prediction_as_wrong(loaded, tmp_path, monkeypatch):
+    """A prediction that only ever reports its hits is not a measurement."""
+    from ff_agent.inseason import log as LOG
+    monkeypatch.setattr(LOG, "log_path", lambda season=2026: tmp_path / "l.jsonl")
+    st, ros = loaded
+    LOG.write("waivers", season=2026, week=WEEK, decision={"grabs": ["fa2"]})
+    d, fp = B.freeagents_digest(st, ros, added_ids={"fa2"})
+    assert fp["taken"] == ["fa2"]
+    assert any("was claimed" in t for t, _ in d.sections)
+
+
+def test_freeagents_says_when_it_cannot_tell_who_was_taken(loaded, tmp_path, monkeypatch):
+    from ff_agent.inseason import log as LOG
+    monkeypatch.setattr(LOG, "log_path", lambda season=2026: tmp_path / "l.jsonl")
+    st, ros = loaded
+    d, _ = B.freeagents_digest(st, ros, added_ids=None)
+    assert any("no transaction log" in n for n in d.notes)
+
+
+def test_injuries_flags_a_questionable_starter_with_the_measured_rate(loaded):
+    """F10: the word 'questionable' alone is not actionable — a Questionable QB
+    sits roughly twice as often as a Questionable skill player."""
+    st, ros = loaded
+    inj = pl.DataFrame({"gsis_id": ["q1"], "report_status": ["Questionable"],
+                        "practice_status": ["Limited Participation in Practice"]})
+    d, fp = B.injuries_digest(st, ros, injuries=inj)
+    assert "q1" in fp["flagged"]
+    body = "\n".join(ln for _t, lines in d.sections for ln in lines)
+    assert "% to sit" in body
+    assert "twice as often" in body, "the QB asymmetry must be stated"
+
+
+def test_injuries_distinguishes_no_report_from_a_healthy_roster(loaded):
+    """'Everyone reads as healthy' is a statement about the DATA."""
+    st, ros = loaded
+    d, _ = B.injuries_digest(st, ros, injuries=None)
+    assert any("statement about the DATA" in n for n in d.notes)
+    clean, _ = B.injuries_digest(st, ros, injuries=pl.DataFrame({
+        "gsis_id": ["q1"], "report_status": [None], "practice_status": [None]}))
+    assert "nobody flagged" in clean.subject
+
+
+def test_the_scoring_tripwire_is_silent_when_clean(monkeypatch):
+    """F2. A clean run says nothing — §6.4."""
+    from ff_agent.scoring import validate as VAL
+    monkeypatch.setattr(VAL, "layer_a_rules_check", lambda season, weeks=None:
+                        pl.DataFrame({"week": [1, 1], "name": ["A", "B"],
+                                      "position": ["QB", "RB"],
+                                      "espn_points": [20.0, 10.0],
+                                      "rules_points": [20.0, 10.0],
+                                      "delta": [0.0, 0.0]}))
+    alarms, notes = B.scoring_tripwire(2026, 1)
+    assert alarms == []
+    assert any("clean" in n for n in notes)
+
+
+def test_the_scoring_tripwire_alarms_on_a_rule_change(monkeypatch):
+    """This league changed its scoring once already (PC and INC removed after
+    2024). The tripwire turns 'found in January' into 'found next Tuesday'."""
+    from ff_agent.scoring import validate as VAL
+    monkeypatch.setattr(VAL, "layer_a_rules_check", lambda season, weeks=None:
+                        pl.DataFrame({"week": [1], "name": ["A"],
+                                      "position": ["QB"], "espn_points": [20.0],
+                                      "rules_points": [23.5], "delta": [3.5]}))
+    alarms, notes = B.scoring_tripwire(2026, 1)
+    assert alarms and "SCORING MAY HAVE CHANGED" in alarms[0]
+    assert any("delta" in n or "+3.50" in n for n in notes)
+
+
+def test_refresh_is_silent_when_nothing_is_wrong(loaded, monkeypatch):
+    monkeypatch.setattr(B, "scoring_tripwire", lambda s, w: ([], ["clean"]))
+    st, ros = loaded
+    d, _ = B.refresh_digest(st, ros)
+    assert d.is_empty, "a clean refresh must send nothing (§6.4)"
+
+
+def test_refresh_speaks_when_the_tripwire_fires(loaded, monkeypatch):
+    monkeypatch.setattr(B, "scoring_tripwire",
+                        lambda s, w: (["SCORING MAY HAVE CHANGED: 5 rows"], ["x"]))
+    st, ros = loaded
+    d, _ = B.refresh_digest(st, ros)
+    assert not d.is_empty and d.urgent
+
+
+def test_most_added_rebuilds_the_control_from_transactions():
+    """F4: player_owned_espn is null in-season, so the control is rebuilt from
+    what the other managers actually DID."""
+    from ff_agent.inseason import audit as AU
+    txns = pl.DataFrame({
+        "scoring_period": [1] * 5, "fantasy_team": ["A", "B", "C", "D", "E"],
+        "action": ["WAIVER ADDED"] * 4 + ["FA ADDED"],
+        "espn_id": ["x", "x", "x", "y", "y"],
+        "name": ["X"] * 3 + ["Y", "Y"]})
+    assert AU.most_added(txns, 1) == "x"
+    assert AU.most_added(pl.DataFrame(schema={
+        "scoring_period": pl.Int64, "fantasy_team": pl.Utf8, "action": pl.Utf8,
+        "espn_id": pl.Utf8, "name": pl.Utf8}), 1) is None
+
+
+def test_the_season_verdict_says_UNMEASURED_rather_than_passing():
+    """M7's precedent: a number with no control beside it should not be
+    believed, so 'no control' must not read as success."""
+    from ff_agent.inseason import audit as AU
+    unmeasured = pl.DataFrame({"week": [1, 2], "measured": [False, False],
+                               "edge_vs_control": [None, None]})
+    assert "UNMEASURED" in AU.season_verdict(unmeasured)
+    assert "nothing logged" in AU.season_verdict(pl.DataFrame())
+    losing = pl.DataFrame({"week": [1], "measured": [True],
+                           "edge_vs_control": [-2.0]})
+    assert "LOSES" in AU.season_verdict(losing)
+    assert "ship the control" in AU.season_verdict(losing)
+
+
+def test_the_backtest_gate_still_cannot_pass_on_no_data():
+    from ff_agent.inseason import backtest as BT
+    assert not BT.run().passed

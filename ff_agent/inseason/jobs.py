@@ -222,11 +222,16 @@ def run(
         _deliver(res, notifier, now)
         return res
 
+    # The DECISION payload is logged beside the rendered text, because §10's
+    # "log every recommendation with its inputs" is only half useful if nothing
+    # can read it back. audit.py scores against this, and the Wednesday
+    # free-agent sweep checks last night's predictions against it — both need
+    # ids, not prose.
+    fp = LOG.fingerprint(fingerprint_payload)
     LOG.write(job, season=season, week=week, subject=d.full_subject,
               sections={t: lines for t, lines in d.sections},
-              alarms=d.alarms, notes=d.notes)
-
-    fp = LOG.fingerprint(fingerprint_payload)
+              alarms=d.alarms, notes=d.notes, decision=fingerprint_payload,
+              fingerprint=fp)
     if d.is_empty and not unconditional:
         return JobResult(job, True, detail="nothing to say — not sent")
     if not unconditional and LOG.already_sent(job, season, week, fp):

@@ -238,3 +238,97 @@ def run(
     if claim_predictions:
         arms.append(claim_calibration(*claim_predictions))
     return GateResult(season=season, weeks=weeks, arms=arms)
+
+
+# ─── Reading the real 2025 season (F3) ───────────────────────────────────────
+def load_season(
+    season: int = REPLAY_SEASON,
+    weeks: tuple[int, ...] = REPLAY_WEEKS,
+    my_team: str | None = None,
+) -> dict:
+    """Reconstruct the replay inputs from ESPN, week by week, with no lookahead.
+
+    Each week is assembled from what was knowable on the Tuesday: rosters as of
+    that week, the transaction log for the control, and box scores for what
+    actually happened. Nothing here reads a later week.
+    """
+    from ff_agent.config import MY_TEAM_NAME
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import audit as AU
+
+    my_team = my_team or MY_TEAM_NAME
+    lineup_weeks, waiver_weeks = [], []
+    notes: list[str] = []
+
+    for wk in weeks:
+        try:
+            box = ESPN.started_lineup(season, wk)
+        except Exception as exc:
+            notes.append(f"week {wk}: no box scores ({type(exc).__name__})")
+            continue
+
+        mine = box.filter(pl.col("fantasy_team") == my_team)
+        if mine.is_empty():
+            notes.append(
+                f"week {wk}: no rows for {my_team!r} — team names are mutable, "
+                f"so this may be a rename rather than a bye."
+            )
+            continue
+
+        actual_points = dict(zip(mine["espn_id"].to_list(),
+                                 [p or 0.0 for p in mine["points"].to_list()]))
+        started = mine.filter(
+            ~pl.col("slot_position").is_in(["BE", "IR"])
+        )["espn_id"].to_list()
+
+        roster = mine.select(
+            pl.col("espn_id").alias("canonical_id"),
+            pl.col("name"),
+            pl.col("slot_position").alias("position"),
+            pl.col("projected_points").fill_null(0.0).alias("weekly_points"),
+            pl.col("projected_points").fill_null(0.0).alias("espn_projection"),
+        )
+        lineup_weeks.append({
+            "week": wk, "roster": roster,
+            "actual_points": actual_points, "actual_started": started,
+        })
+
+        try:
+            txns = ESPN.transactions(season, wk)
+            waiver_weeks.append({
+                "week": wk,
+                "most_added": AU.most_added(txns, wk),
+                "our_claim": None,      # filled by a replay that runs the engine
+                "ros_gain": {},
+            })
+        except Exception as exc:
+            notes.append(f"week {wk}: no transaction log ({type(exc).__name__})")
+
+    if not lineup_weeks:
+        notes.append(
+            "no week produced usable data. The replay needs a COMPLETED season "
+            "with box scores — 2025 is the only one this league has that is "
+            "both 2-QB and on the current ruleset."
+        )
+    return {
+        "lineup_weeks": lineup_weeks,
+        "waiver_weeks": waiver_weeks,
+        "notes": notes,
+    }
+
+
+def run_live(
+    season: int = REPLAY_SEASON,
+    weeks: tuple[int, ...] = REPLAY_WEEKS,
+    my_team: str | None = None,
+) -> GateResult:
+    """The gate against real data. Still capable of not passing."""
+    data = load_season(season, weeks, my_team)
+    result = run(
+        lineup_weeks=data["lineup_weeks"],
+        waiver_weeks=data["waiver_weeks"],
+        season=season, weeks=weeks,
+    )
+    for arm in result.arms:
+        arm.notes.extend(data["notes"][:3])
+    return result

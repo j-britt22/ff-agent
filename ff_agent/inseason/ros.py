@@ -408,3 +408,64 @@ def from_espn(
     out = build(agg, from_week=from_week, weight=weight, season=season)
     out.notes = notes + out.notes
     return out
+
+
+# ─── §3.3's sack term, from live current-season play-by-play ─────────────────
+MIN_QB_GAMES_FOR_SOE = 3
+"""Below this, a quarterback's sacks-over-expected is one bad afternoon.
+
+M3 measured SOE's year-over-year persistence at 0.394 and M3b its carry-forward
+at 0.434 — both on FULL seasons. Two games of it is noise, and noise multiplied
+by nine remaining games is a confidently wrong number pointed at exactly the
+position §9.3 says to spend waiver priority on.
+"""
+
+
+def live_sacks_over_expected(
+    season: int, min_games: int = MIN_QB_GAMES_FOR_SOE
+) -> tuple[pl.DataFrame | None, str | None]:
+    """Current-season SOE per game, or ``(None, why_not)``.
+
+    Returns a REASON rather than an empty frame when it cannot be computed, so
+    the digest can say "the sack term is dark because it is week 2" instead of
+    silently pricing every quarterback as league-average. §3.3 calls this the
+    cheap, durable edge nobody else prices; a silent zero is the one way to
+    lose it without noticing.
+    """
+    try:
+        from ff_agent.projections import xfp as X
+
+        per_week = X.expected_sacks(season)
+    except Exception as exc:
+        return None, (
+            f"sacks-over-expected unavailable ({type(exc).__name__}), so §3.3's "
+            f"term is zero for every quarterback. That is the one edge this "
+            f"league has that no public ranking prices."
+        )
+    if per_week is None or per_week.is_empty():
+        return None, (
+            "no current-season play-by-play yet, so §3.3's sack term is zero. "
+            "It switches on by itself once a few games exist."
+        )
+
+    agg = (
+        per_week.group_by("player_id")
+        .agg(
+            pl.len().alias("games"),
+            pl.col("sacks_over_expected").sum().alias("soe_total"),
+        )
+        .filter(pl.col("games") >= min_games)
+        .with_columns(
+            (pl.col("soe_total") / pl.col("games")).round(3)
+            .alias("sacks_over_expected_per_game"),
+            pl.col("player_id").alias("canonical_id"),
+        )
+        .select("canonical_id", "games", "sacks_over_expected_per_game")
+    )
+    if agg.is_empty():
+        return None, (
+            f"no quarterback has {min_games} games yet, so §3.3's sack term is "
+            f"still zero. Two games of sacks-over-expected is one bad afternoon, "
+            f"not a trait — it switches on by itself shortly."
+        )
+    return agg, None
