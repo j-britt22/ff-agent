@@ -232,10 +232,15 @@ def run(
               sections={t: lines for t, lines in d.sections},
               alarms=d.alarms, notes=d.notes, decision=fingerprint_payload,
               fingerprint=fp)
+    # The digest rides along even when it will not be SENT. A notes-only
+    # digest — "no injury report available", "nothing cleared" — is exactly
+    # what a human running --dry-run needs to see, and silently discarding it
+    # made three jobs look like they had done nothing at all.
     if d.is_empty and not unconditional:
-        return JobResult(job, True, detail="nothing to say — not sent")
+        return JobResult(job, True, digest=d, detail="nothing to say — not sent")
     if not unconditional and LOG.already_sent(job, season, week, fp):
-        return JobResult(job, True, detail="unchanged since the last send")
+        return JobResult(job, True, digest=d,
+                         detail="unchanged since the last send")
 
     res = JobResult(job, True, digest=d)
     _deliver(res, notifier, now)

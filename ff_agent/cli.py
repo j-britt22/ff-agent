@@ -1186,10 +1186,27 @@ def cmd_trades(args) -> int:
 
 
 def cmd_week14(args) -> int:
+    """§2.2's free week.
+
+    Loads the CURRENT week's state, not week 14's. Forcing week=14 made the
+    staleness check demand thirteen completed weeks of results — so running it
+    in September refused with "weeks [1..13] have been played but carry no
+    results", which is true of week 14 and false of today. The week-14 FRAMING
+    (no lineup, weeks 15-17 value only) is a property of the job, not of the
+    data it needs to read.
+    """
     from ff_agent.inseason import builders as B
+    from ff_agent.inseason import clock as CK
+
+    now_week = CK.current_week(SEASON)
     print("§2.2: week 14 is my bye. No lineup, no game to lose, record locked.")
-    print("Every drop is free; every add is a pure weeks 15-17 bet.\n")
-    return _run_job(args, "week14", B.week14_digest, week=14, unconditional=True)
+    print("Every drop is free; every add is a pure weeks 15-17 bet.")
+    if now_week is not None and now_week != 14:
+        print(f"(previewing from week {now_week} — values are today's, the "
+              f"FRAMING is week 14's)\n")
+    else:
+        print()
+    return _run_job(args, "week14", B.week14_digest, unconditional=True)
 
 
 def cmd_inseason(args) -> int:

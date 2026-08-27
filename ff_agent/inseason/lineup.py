@@ -270,9 +270,19 @@ class LineupPlan:
     alarms: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
+    espn_locked: dict[str, str] = field(default_factory=dict)
+    """Slots ESPN has ALREADY locked — kickoff has passed. Distinct from
+    ``pins``, which also carries what we are recommending be committed. Reporting
+    the two as one number told a Wednesday reader "1 locked" when nothing had
+    kicked off; what was really meant was "1 we suggest you commit"."""
+
     @property
     def open_slots(self) -> int:
-        return sum(STARTER_SLOTS.values()) - len(self.pins)
+        return sum(STARTER_SLOTS.values()) - len(self.espn_locked)
+
+    @property
+    def recommended_commits(self) -> int:
+        return len(self.pins) - len(self.espn_locked)
 
     @property
     def runway(self) -> dt.timedelta | None:
@@ -285,7 +295,8 @@ class LineupPlan:
         return {
             "week": self.week,
             "open_slots": self.open_slots,
-            "locked_slots": len(self.pins),
+            "locked_slots": len(self.espn_locked),
+            "recommended_commits": self.recommended_commits,
             "expected_points": round(self.expected_points, 2),
             "next_lock": None if not self.next_lock else self.next_lock.at.isoformat(),
             "minutes_to_next_lock": (
@@ -437,6 +448,7 @@ def build(
         )
     return LineupPlan(
         week=week, now=now, starters=starters, bench=bench, pins=final_pins,
+        espn_locked=dict(pins),
         decisions=decisions, next_lock=nxt, expected_points=expected,
         alarms=alarms, notes=notes,
     )

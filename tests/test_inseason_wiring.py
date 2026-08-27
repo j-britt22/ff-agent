@@ -584,3 +584,118 @@ def test_the_season_verdict_says_UNMEASURED_rather_than_passing():
 def test_the_backtest_gate_still_cannot_pass_on_no_data():
     from ff_agent.inseason import backtest as BT
     assert not BT.run().passed
+
+
+# ─── the six bugs the first live multi-job run exposed ──────────────────────
+def test_espn_publishing_only_one_week_does_not_shrink_everyone(loaded):
+    """THE CRITICAL ONE. ESPN publishes only the weeks it has projected —
+    often just the upcoming one. Summing the window and treating unpublished
+    weeks as zero made Justin Herbert 1.6 pts/wk and a full starting lineup
+    10.3 instead of ~130."""
+    proj = pl.DataFrame([
+        {"canonical_id": "h", "name": "QB", "position": "QB", "team": "BUF",
+         "week": wk, "projected_points": 22.4 if wk == 1 else None}
+        for wk in range(1, 15)
+    ])
+    out = ROS.from_espn(proj, from_week=1, season=2026,
+                        byes=pl.DataFrame({"team": ["BUF"], "bye_week": [7]}))
+    row = out.frame.filter(pl.col("canonical_id") == "h")
+    assert row["weekly_points"][0] == pytest.approx(22.4)
+    assert row["ros_points"][0] == pytest.approx(22.4 * 13)
+    assert row["weeks_projected"][0] == 1
+
+
+def test_partial_publishing_does_not_rank_by_espns_schedule(loaded):
+    """Worse than uniformly wrong, the old bug was UNEVEN: an identical player
+    with two published weeks outranked one with a single published week."""
+    rows = []
+    for cid, n_pub in (("one", 1), ("two", 2)):
+        for wk in range(1, 15):
+            rows.append({"canonical_id": cid, "name": cid, "position": "RB",
+                         "team": "SF", "week": wk,
+                         "projected_points": 15.0 if wk <= n_pub else None})
+    out = ROS.from_espn(pl.DataFrame(rows), from_week=1, season=2026).frame
+    vals = dict(zip(out["canonical_id"].to_list(), out["weekly_points"].to_list()))
+    assert vals["one"] == pytest.approx(vals["two"]), (
+        "two identical players must not be separated by ESPN's publishing order"
+    )
+
+
+def test_coverage_is_stated_not_hidden_in_a_total(loaded):
+    """'ESPN projected one of fourteen weeks' and 'this player scores little'
+    look identical in a total."""
+    proj = pl.DataFrame([
+        {"canonical_id": "h", "name": "QB", "position": "QB", "team": "BUF",
+         "week": wk, "projected_points": 20.0 if wk == 1 else None}
+        for wk in range(1, 15)
+    ])
+    out = ROS.from_espn(proj, from_week=1, season=2026)
+    assert any("median of 1 of the 14" in n for n in out.notes)
+
+
+def test_a_player_with_no_projection_is_dropped_not_priced_at_zero(loaded):
+    rows = [{"canonical_id": "real", "name": "R", "position": "RB", "team": "SF",
+             "week": wk, "projected_points": 12.0} for wk in range(1, 15)]
+    rows += [{"canonical_id": "blank", "name": "B", "position": "RB", "team": "SF",
+              "week": wk, "projected_points": None} for wk in range(1, 15)]
+    out = ROS.from_espn(pl.DataFrame(rows), from_week=1, season=2026)
+    assert "blank" not in out.frame["canonical_id"].to_list()
+    assert any("no published projection" in n for n in out.notes)
+
+
+def test_no_projections_at_all_is_refused_not_priced_at_zero(loaded):
+    proj = pl.DataFrame([
+        {"canonical_id": "h", "name": "QB", "position": "QB", "team": "BUF",
+         "week": wk, "projected_points": None} for wk in range(1, 15)])
+    with pytest.raises(ROS.ROSError, match="not the same as projecting zero"):
+        ROS.from_espn(proj, from_week=1, season=2026)
+
+
+def test_the_sack_note_is_not_printed_twice(loaded):
+    """The caller knows WHY there is no input — 'it is week 2' reads very
+    differently from 'the cache is missing'. Two sentences saying it vaguely is
+    worse than one saying it precisely."""
+    st, ros = loaded
+    out = ROS.from_espn(
+        ST._normalize(pl.DataFrame([
+            {"espn_id": "h", "canonical_id": "h", "name": "QB", "position": "QB",
+             "team": "BUF", "week": wk, "projected_points": 20.0}
+            for wk in range(1, 15)])),
+        from_week=1, season=2026, soe=None)
+    sack_notes = [n for n in out.notes if "sacks-over-expected" in n]
+    assert len(sack_notes) == 0, "from_espn must stay silent; the caller explains"
+
+
+def test_a_notes_only_digest_still_reaches_the_caller(tmp_path, monkeypatch):
+    """Three jobs looked like they had done nothing, because a digest whose
+    entire content was a note got discarded before the CLI could show it."""
+    from ff_agent.inseason import jobs as J
+    from ff_agent.inseason import log as LOG
+    from ff_agent.inseason.notify import Digest, MemoryNotifier
+
+    monkeypatch.setattr(LOG, "STATE_DIR", tmp_path / "s")
+    monkeypatch.setattr(LOG, "log_path", lambda season=2026: tmp_path / "l.jsonl")
+    n = MemoryNotifier()
+    res = J.run("injuries",
+                lambda: (Digest(job="injuries", subject="no injury report",
+                                notes=["no injury report available"]), {}),
+                n, week=1, skip_gate=True)
+    assert res.digest is not None, "the caller must still be able to SHOW it"
+    assert res.sent is False and n.sent == [], "but it must not be SENT (§6.4)"
+    assert "nothing to say" in res.detail
+
+
+def test_the_lineup_headline_separates_locked_from_recommended(loaded):
+    """'1 locked' on a Wednesday when nothing has kicked off meant '1 we
+    suggest you commit'. Two different facts, one number."""
+    kk = CK.kickoff_table(2026, pl.DataFrame([{
+        "game_id": "g1", "season": 2026, "week": WEEK, "game_type": "REG",
+        "gameday": "2026-11-01", "gametime": "13:00", "weekday": "Sunday",
+        "away_team": a, "home_team": h}
+        for a, h in [("BUF", "BAL"), ("SF", "KC"), ("DEN", "MIA"), ("GB", "NYJ"),
+                     ("LV", "DAL"), ("SEA", "CIN")]]))
+    st, ros = loaded
+    d, _ = B.lineup_digest(st, ros, now=dt.datetime(2026, 10, 30, 9, 0, tzinfo=ET),
+                           kickoffs=kk)
+    assert "already locked by kickoff" in d.headline
+    assert "recommended to commit" in d.headline

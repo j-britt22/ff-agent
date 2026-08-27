@@ -360,15 +360,31 @@ def from_espn(
             f"have published them yet, which is not the same as projecting zero."
         )
 
+    # ESPN PUBLISHES ONLY THE WEEKS IT HAS PROJECTED — often just the upcoming
+    # one, especially before the season starts. Summing the window and treating
+    # the unpublished weeks as ZERO made every player roughly 1/14th of himself:
+    # Justin Herbert came back at 1.6 points a week and a full starting lineup
+    # at 10.3 instead of ~130. Worse than uniformly wrong, it was UNEVEN — a
+    # player with two published weeks outranked an identical one with a single
+    # published week, purely on ESPN's publishing schedule.
+    #
+    # So the rate is taken over the weeks that actually carry a projection, and
+    # the season total is rebuilt from it. A zero is treated as "not projected"
+    # rather than "projected to score nothing": a real zero week is a BYE, which
+    # is not a game and is already excluded from games_remaining below, so
+    # dropping it from the per-game rate is correct on both counts.
+    scored = pl.col("projected_points").is_not_null() & (pl.col("projected_points") > 0)
     agg = ahead.group_by("canonical_id").agg(
         pl.col("position").first(),
         pl.col("team").first(),
         pl.col("name").first() if "name" in ahead.columns else pl.lit(None).alias("name"),
-        pl.col("projected_points").fill_null(0.0).sum().round(2).alias("ros_points"),
+        pl.col("projected_points").filter(scored).mean().alias("_rate"),
+        pl.col("projected_points").filter(scored).len().alias("weeks_projected"),
     )
 
     # games_remaining excludes the bye: the NFL plays 18 weeks and 17 GAMES, and
     # M7 paid 6.25% for getting that divisor wrong in the other direction.
+    notes: list[str] = []
     n_weeks = len(weeks)
     if byes is not None and "bye_week" in byes.columns:
         agg = agg.join(byes.select("team", "bye_week"), on="team", how="left")
@@ -380,9 +396,11 @@ def from_espn(
             n_weeks
             - pl.when(pl.col("bye_week").is_in(list(weeks))).then(1).otherwise(0)
         ).cast(pl.Int64).alias("games_remaining")
-    )
+    ).with_columns(
+        (pl.col("_rate").fill_null(0.0) * pl.col("games_remaining"))
+        .round(2).alias("ros_points")
+    ).drop("_rate")
 
-    notes: list[str] = []
     if soe is not None and "sacks_over_expected_per_game" in soe.columns:
         agg = agg.join(
             soe.select("canonical_id", "sacks_over_expected_per_game"),
@@ -391,10 +409,35 @@ def from_espn(
     else:
         agg = agg.with_columns(
             pl.lit(None, dtype=pl.Float64).alias("sacks_over_expected_per_game"))
+        # Deliberately silent: the CALLER knows WHY there is no input — "it is
+        # week 2" reads very differently from "the cache is missing" — and says
+        # so. Adding a second, vaguer sentence here printed the same warning
+        # twice in every digest.
+
+    # Coverage is stated, because "ESPN has projected one of fourteen weeks" and
+    # "this player is projected to score very little" look identical in a total.
+    covered = agg.filter(pl.col("weeks_projected") > 0)
+    if covered.is_empty():
+        raise ROSError(
+            f"ESPN has published no per-week projections for weeks "
+            f"{weeks[0]}-{weeks[-1]}. Refusing to price a roster at zero — that "
+            f"is not the same as projecting zero."
+        )
+    median_cov = int(covered["weeks_projected"].median() or 0)
+    if median_cov < n_weeks:
         notes.append(
-            "no sacks-over-expected input, so §3.3's term is zero for every "
-            "quarterback. That is the one edge this league has that no public "
-            "ranking prices — worth restoring before trusting a QB claim."
+            f"ESPN has published projections for a median of {median_cov} of the "
+            f"{n_weeks} remaining weeks. Rest-of-season value is that per-game "
+            f"rate extended over each player's remaining games, not a sum of "
+            f"published weeks — otherwise everyone reads as a fraction of "
+            f"himself and unevenly so."
+        )
+    blank = agg.filter(pl.col("weeks_projected") == 0)
+    if blank.height:
+        agg = covered
+        notes.append(
+            f"{blank.height} player(s) have no published projection at all and "
+            f"were dropped rather than priced at zero."
         )
 
     dead = agg.filter(pl.col("games_remaining") <= 0)

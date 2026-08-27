@@ -190,8 +190,11 @@ def lineup_digest(
     return Digest(
         job="lineup", subject=f"lineup — {len(actionable)} decision(s)",
         week=state.week, urgent=bool(plan.alarms),
-        headline=f"{plan.open_slots} slots open, {len(plan.pins)} locked. "
-                 f"Projected {plan.expected_points:.1f}.",
+        headline=(
+            f"{plan.open_slots} slots open, {len(plan.espn_locked)} already "
+            f"locked by kickoff, {plan.recommended_commits} recommended to "
+            f"commit now. Projected {plan.expected_points:.1f}."
+        ),
         sections=sections, alarms=plan.alarms,
         notes=list(plan.notes) + list(state.notes), deadline=
         plan.next_lock.at if plan.next_lock else None,
