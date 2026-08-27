@@ -136,19 +136,59 @@ def resolve(
         pl.col("canonical_id").is_null() | (pl.col("match_method") == "unresolved")
     )
 
-    # A collision — two ESPN players on one canonical id — is NOT a soft failure.
-    # It silently merges two people, which is worse than not resolving one.
-    collisions = ok.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    # A collision — two DIFFERENT ESPN players on one canonical id — is NOT a
+    # soft failure. It silently merges two people, which is worse than not
+    # resolving one.
+    #
+    # Counted over DISTINCT espn_ids, not rows. Counting rows makes any LONG
+    # frame look like a mass collision: the per-week projection table carries one
+    # row per (player, week), so a 14-week season reported all 553 players as
+    # colliding with themselves. Philip Rivers appearing fourteen times is
+    # fourteen weeks of Philip Rivers, not fourteen Philip Riverses.
+    collisions = (
+        ok.group_by("canonical_id")
+        .agg(pl.col("espn_id").n_unique().alias("n_players"))
+        .filter(pl.col("n_players") > 1)
+    )
     if collisions.height:
-        rows = ok.filter(pl.col("canonical_id").is_in(
-            collisions["canonical_id"].to_list())).sort("canonical_id")
+        rows = (
+            ok.filter(pl.col("canonical_id").is_in(collisions["canonical_id"].to_list()))
+            .select("espn_id", "name", "position", "canonical_id")
+            .unique()
+            .sort("canonical_id", "espn_id")
+        )
         raise StateError(
             f"{label}: {collisions.height} canonical id(s) claimed by more than "
             f"one ESPN player — two people silently merged into one.\n"
-            f"{rows.select('espn_id', 'name', 'position', 'canonical_id')}\n"
+            f"{rows}\n"
             f"  Fix with an explicit override row (§0.2); never by picking one."
         )
     return ok, bad
+
+
+def resolve_long(
+    long_frame: pl.DataFrame,
+    label: str,
+    key: str = "espn_id",
+    canonical: pl.DataFrame | None = None,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Resolve a frame carrying MANY rows per player — e.g. one row per week.
+
+    Resolution is a question about PEOPLE, so it is asked once per person and the
+    answer joined back. Passing a long frame to ``resolve`` directly also does
+    553 lookups fourteen times over, which is slow as well as wrong.
+    """
+    people = long_frame.select(
+        key, "name", "position", "team"
+    ).unique(subset=[key], keep="first")
+    ok, bad = resolve(people, label, canonical)
+    if ok.is_empty():
+        return long_frame.head(0).with_columns(
+            pl.lit(None, dtype=pl.Utf8).alias("canonical_id")), bad
+    joined = long_frame.join(
+        ok.select(key, "canonical_id"), on=key, how="inner"
+    )
+    return joined, bad
 
 
 def unresolved_note(unresolved: pl.DataFrame, label: str) -> str | None:

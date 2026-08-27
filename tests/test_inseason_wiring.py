@@ -368,3 +368,85 @@ def test_every_real_job_actually_calls_a_builder():
     src = Path("ff_agent/cli.py").read_text()
     for fn in ("waivers_digest", "trades_digest", "week14_digest", "lineup_digest"):
         assert fn in src, f"cli never calls {fn}"
+
+
+# ─── the collision guard must count PEOPLE, not rows ────────────────────────
+# Found on the first live run: `monitor --job waivers` refused to start,
+# reporting "553 canonical id(s) claimed by more than one ESPN player" and
+# printing Philip Rivers fourteen times. 553 x 14 = 7,742, which was the row
+# count — every player "colliding" with himself once per week, because the
+# per-week projection table is LONG and the guard counted rows.
+def _long_projection_frame() -> pl.DataFrame:
+    return pl.DataFrame({
+        "espn_id": ["5529"] * 14 + ["8439"] * 14,
+        "name": ["Philip Rivers"] * 14 + ["Aaron Rodgers"] * 14,
+        "position": ["QB"] * 28,
+        "team": ["LAC"] * 14 + ["NYJ"] * 14,
+        "week": list(range(1, 15)) * 2,
+        "projected_points": [18.0] * 28,
+    })
+
+
+@pytest.fixture
+def passthrough_resolve(monkeypatch):
+    ids = {"5529": "00-0022942", "8439": "00-0023459"}
+    monkeypatch.setattr(ST, "resolve", lambda df, label, canonical=None: (
+        df.with_columns(
+            pl.col("espn_id").replace_strict(ids, default=None).alias("canonical_id"),
+            pl.lit("mock").alias("match_method")),
+        df.head(0).with_columns(pl.lit(None, dtype=pl.Utf8).alias("canonical_id")),
+    ))
+
+
+def test_a_long_frame_is_not_a_mass_collision(passthrough_resolve):
+    """Fourteen weeks of Philip Rivers is not fourteen Philip Riverses."""
+    long = _long_projection_frame()
+    out, bad = ST.resolve_long(long, "projections")
+    assert out.height == 28
+    assert out["canonical_id"].n_unique() == 2
+    assert bad.is_empty()
+
+
+def test_resolve_long_asks_once_per_person_not_once_per_row(monkeypatch):
+    """Also a performance property: 553 players x 14 weeks was 7,742 lookups."""
+    seen = {}
+
+    def counting(df, label, canonical=None):
+        seen["rows"] = df.height
+        return (df.with_columns(pl.col("espn_id").alias("canonical_id"),
+                                pl.lit("mock").alias("match_method")),
+                df.head(0).with_columns(pl.lit(None, dtype=pl.Utf8).alias("canonical_id")))
+
+    monkeypatch.setattr(ST, "resolve", counting)
+    ST.resolve_long(_long_projection_frame(), "projections")
+    assert seen["rows"] == 2, "resolution must be asked once per PERSON"
+
+
+def test_a_real_collision_is_still_fatal(monkeypatch):
+    """Two DIFFERENT espn_ids on one canonical id silently merges two people,
+    which is worse than not resolving one. The looser row count must not have
+    loosened this."""
+    from ff_agent.data import crosswalk as CW
+
+    merged = pl.DataFrame({
+        "espn_id": ["111", "222"], "name": ["Player A", "Player B"],
+        "position": ["WR", "WR"], "team": ["SF", "SF"],
+        "canonical_id": ["00-X", "00-X"], "match_method": ["m", "m"]})
+    monkeypatch.setattr(CW, "resolve_players", lambda df, canonical=None: merged)
+    with pytest.raises(ST.StateError, match="more than one ESPN player"):
+        ST.resolve(merged.drop("canonical_id", "match_method"), "test")
+
+
+def test_the_collision_report_lists_each_player_once(monkeypatch):
+    """The false alarm printed 7,742 rows. A real one has to stay readable."""
+    from ff_agent.data import crosswalk as CW
+
+    merged = pl.DataFrame({
+        "espn_id": ["111"] * 5 + ["222"] * 5,
+        "name": ["Player A"] * 5 + ["Player B"] * 5,
+        "position": ["WR"] * 10, "team": ["SF"] * 10,
+        "canonical_id": ["00-X"] * 10, "match_method": ["m"] * 10})
+    monkeypatch.setattr(CW, "resolve_players", lambda df, canonical=None: merged)
+    with pytest.raises(ST.StateError) as exc:
+        ST.resolve(merged.drop("canonical_id", "match_method"), "test")
+    assert str(exc.value).count("Player A") == 1

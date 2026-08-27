@@ -1066,8 +1066,10 @@ def _load_state_and_ros(args, week=None):
     from ff_agent.inseason import state as ST
 
     st = ST.load(SEASON, week=week)
+    # The projection table is LONG — one row per (player, week) — so resolution
+    # is asked once per person and joined back, not asked once per row.
     proj = ST._normalize(ESPN.player_projections(SEASON))
-    resolved, _bad = ST.resolve(proj, "projections")
+    resolved, _bad = ST.resolve_long(proj, "projections")
     from ff_agent.data import byes as BY
     byes = BY.bye_weeks(SEASON).select("team", pl.col("bye_week").cast(pl.Int64))
     ros = ROS.from_espn(resolved, from_week=st.week, byes=byes, season=SEASON)
