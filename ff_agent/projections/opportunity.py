@@ -48,14 +48,81 @@ def _safe_div(a: str, b: str) -> pl.Expr:
     return pl.when(pl.col(b) > 0).then(pl.col(a) / pl.col(b)).otherwise(None)
 
 
+def assert_one_row_per_player(df: pl.DataFrame, where: str) -> None:
+    """§0.2, applied to a feature table.
+
+    "Every rostered and drafted player must resolve to exactly one canonical ID.
+    Assert it." Resolution is only half of §0.2 — a table that carries the same
+    person twice breaks it just as thoroughly, and every join downstream
+    multiplies the damage. Fail here rather than deduplicating downstream, where
+    which row survives is an accident of sort order.
+    """
+    dupes = df.group_by("canonical_id").len().filter(pl.col("len") > 1)
+    if not dupes.height:
+        return
+    cols = [c for c in ("canonical_id", "name", "position", "team", "games",
+                        "n_teams", "points", "model_points") if c in df.columns]
+    # nulls_equal, and a semi-join rather than is_in: a NULL id duplicated is
+    # still a §0.2 failure, but `null.is_in(...)` is null, so filtering would
+    # drop exactly the rows being complained about and raise a blocking error
+    # naming nobody. (.implode() does not help — it fixes the deprecation that
+    # board/build.py already avoids, not the nulls.)
+    detail = (
+        df.join(dupes.select("canonical_id"), on="canonical_id", how="semi",
+                nulls_equal=True)
+        .select(cols).sort("canonical_id", nulls_last=True)
+    )
+    raise ValueError(
+        f"{dupes.height} canonical_id(s) appear more than once in {where} "
+        f"({int(dupes['len'].sum())} rows). A group key or a join fanned out; "
+        f"find it rather than dropping a row here.\n{detail}"
+    )
+
+
 def player_season_features(season: int) -> pl.DataFrame:
-    """One row per player-season of per-game opportunity."""
-    ps = nv.player_stats(season, offline=True).filter(pl.col("season_type") == "REG")
+    """One row per PLAYER-season of per-game opportunity — not per (player, team).
+
+    nflverse stats are weekly and carry whichever team the player suited up for,
+    so a mid-season trade splits his year into two stints. Keying on team emits
+    both, and because every feature here is a RATE, the shorter stint often
+    projects HIGHER: Adam Thielen's 5 games in PIT came out at 49.7 against his
+    9 in MIN at 37.2, and 9 of 2025's 25 traded skill players were like that.
+    Whatever the downstream then dropped, it was dropping most of a real season.
+
+    So the stints are summed into one player-season here, at the root, and the
+    rates recomputed over the COMBINED games. Two stints genuinely ARE two rows
+    of opportunity — the fix is to add them, never to pick a winner. Efficiency
+    and share features aggregate correctly for free: a ratio of the summed
+    components is the volume-weighted season rate, and the share means now run
+    over all of a player's weeks instead of one stint's.
+
+    ``games`` is deliberately NOT clamped at 17. A traded player can legitimately
+    log 18 in an 18-week season by missing neither team's bye — Rashid Shaheed
+    did exactly that in 2025, 9 with NO and 9 with SEA.
+    """
+    ps = nv.player_stats(season, offline=True).filter(
+        (pl.col("season_type") == "REG")
+        # nflverse ships one placeholder weekly row per week with a NULL
+        # player_id, no position and zero of every stat. Per-team they were 14-18
+        # obvious junk rows; aggregated per player they collapse into a single
+        # phantom with 18 games, which reads like a real player. Nothing
+        # downstream would use it (every consumer filters on position) but a row
+        # with no identity has no place in a §0.2 table.
+        & pl.col("player_id").is_not_null()
+    )
 
     agg = (
-        ps.group_by("player_id", "player_display_name", "position", "team")
+        # Checked across all ten history seasons: zero players carry two
+        # positions or two display names within a season, so team was the only
+        # thing the old key added — and all it added was the trade split.
+        ps.group_by("player_id", "player_display_name", "position")
         .agg(
             pl.len().alias("games"),
+            # the team he finished on, which is the closest this table gets to
+            # where he lines up next year. Informational only: the board takes
+            # team from ECR, never from here.
+            pl.col("team").sort_by("week").last().alias("team"),
+            pl.col("team").n_unique().alias("n_teams"),
             pl.col("targets").sum().alias("targets"),
             pl.col("receptions").sum().alias("receptions"),
             pl.col("receiving_air_yards").sum().alias("air_yards"),
@@ -79,7 +146,7 @@ def player_season_features(season: int) -> pl.DataFrame:
     )
 
     g = pl.col("games")
-    return agg.with_columns(
+    out = agg.with_columns(
         (pl.col("targets") / g).alias("targets_pg"),
         (pl.col("receptions") / g).alias("receptions_pg"),
         (pl.col("air_yards") / g).alias("air_yards_pg"),
@@ -98,13 +165,20 @@ def player_season_features(season: int) -> pl.DataFrame:
         .otherwise(None).alias("sack_rate"),
         pl.lit(season).alias("season"),
     )
+    assert_one_row_per_player(out, f"player_season_features({season})")
+    return out
 
 
 def features_with_actuals(season: int) -> pl.DataFrame:
     """One season's features joined to that season's realised §1 points.
 
     ``points`` and ``games`` are ROLE features (see ROLE_FEATURES), so they have
-    to travel with the opportunity rates when projecting forward.
+    to travel with the opportunity rates when projecting forward. They only agree
+    with each other because the stints are already summed upstream: actuals were
+    always whole-season (``player_season_actuals`` never keyed on team), so while
+    features were per-stint a traded player carried a full season of ``points``
+    against a partial ``games`` — one role feature describing the year and the
+    other describing half of it.
     """
     f = player_season_features(season)
     a = A.player_season_actuals(season).select("canonical_id", "points", "ppg")
