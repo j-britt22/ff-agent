@@ -1,0 +1,23 @@
+# M10b cadence. supercronic format; all times are ET via TZ (finding F7).
+#
+# The LINEUP has no fixed time, because the NFL has no fixed schedule. Week 1
+# of 2026 opens on a WEDNESDAY; week 16 — my semifinal — has three Christmas
+# Day games; week 15 has two Saturday games; Sunday's late slate is two windows
+# twenty minutes apart. So the lineup is a 15-minute tick and clock.py decides
+# whether a checkpoint is due, firing at kickoff -24h / -3h / -75min.
+#
+# Checkpoints are NOT emails: only the weekly advisory is unconditional and
+# everything after it speaks only when the answer moved (§6.4).
+
+# ── §9.1 weekly cadence ──────────────────────────────────────────────────────
+ 0  5 * * 2   cd /app && uv run python -m ff_agent.cli monitor --job refresh
+ 0  8 * * 2   cd /app && uv run python -m ff_agent.cli monitor --job waivers
+ 0  8 * * 3   cd /app && uv run python -m ff_agent.cli monitor --job freeagents
+ 0 10 * * 6   cd /app && uv run python -m ff_agent.cli monitor --job injuries
+ 0  9 * * 1   cd /app && uv run python -m ff_agent.cli monitor --job trades
+
+# ── the lineup: derived from the schedule, not the clock (F9) ────────────────
+*/15 * * * *  cd /app && uv run python -m ff_agent.cli monitor --job tick
+
+# ── health: speaks ONLY when something is wrong (§6.4) ───────────────────────
+ 0  7 * * *   cd /app && uv run python -m ff_agent.cli monitor --job heartbeat

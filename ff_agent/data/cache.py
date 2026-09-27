@@ -48,6 +48,11 @@ TTL_POLICY: dict[str, timedelta] = {
     "espn_rosters": timedelta(hours=1),
     "espn_draft": timedelta(days=1),
     "espn_settings": timedelta(days=1),
+    # In-season reads. Projections move on the injury report, so six hours; the
+    # free-agent pool and lineup slots move on every transaction, so one.
+    "espn_projections": timedelta(hours=6),
+    "espn_current_rosters": timedelta(hours=1),
+    "espn_results": timedelta(hours=6),
     # draft_history spans COMPLETED seasons (2023-2025) in one table, so it is
     # cached with season=None and effective_ttl()'s "a completed season never
     # expires" rule can never engage for it. Without an entry here it fell back

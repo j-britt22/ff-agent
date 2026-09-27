@@ -21,16 +21,34 @@ VARIANCE_SHRINKAGE_WEEKS = 20.0
 
 
 def roster_strength(
-    rosters: pl.DataFrame, projections: pl.DataFrame, games: int = GAMES
+    rosters: pl.DataFrame,
+    projections: pl.DataFrame,
+    games: int = GAMES,
+    value_col: str = "blended_points",
 ) -> dict[str, float]:
     """Expected weekly points per fantasy team from its optimal lineup.
 
     ``rosters`` needs ``fantasy_team`` and ``canonical_id``; ``projections``
-    needs ``canonical_id``, ``position`` and ``blended_points``.
+    needs ``canonical_id``, ``position`` and ``value_col``.
+
+    ``games`` and ``value_col`` are both parameters because in-season the
+    question changes shape: the numerator becomes REST-OF-SEASON points and the
+    divisor becomes REMAINING games, not 17. Hardcoding either would have a
+    week-11 team strength quietly answering a preseason question.
     """
+    if value_col not in projections.columns:
+        raise KeyError(
+            f"projections has no column {value_col!r}. Present: "
+            f"{sorted(projections.columns)}"
+        )
+    if games <= 0:
+        raise ValueError(
+            f"games must be positive, got {games}. In-season this is REMAINING "
+            f"games; a season that has run out has no weekly rate to report."
+        )
     proj = projections.select(
         "canonical_id", "position",
-        (pl.col("blended_points") / games).alias("weekly_points"),
+        (pl.col(value_col) / games).alias("weekly_points"),
     )
     joined = rosters.join(proj, on="canonical_id", how="left").with_columns(
         pl.col("weekly_points").fill_null(0.0),
