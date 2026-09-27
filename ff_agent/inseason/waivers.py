@@ -51,6 +51,14 @@ SCREEN_KEEP = 12
 The screen is a strict prefilter rather than an approximation: a move that never
 reaches my starting lineup in any remaining week cannot move my title odds."""
 
+ROSTER_TARGETS = {"QB": 3, "RB": 6, "WR": 6, "TE": 2, "K": 1, "DST": 1}
+"""§3.6's UPPER bounds — being strictly above one is what makes a player surplus.
+
+They sum to 19 against 17 spots, so this is guidance rather than a partition. It
+is what lets a fourth quarterback be cashed in for a running back even though
+QB4 outprojects him: M8 measured cap 3 over cap 4 on P(title), so the swap that
+lowers raw points raises the roster's value."""
+
 MATERIAL_WEEKLY = 0.20
 """Points per week below which a claim is not worth an email."""
 
@@ -81,6 +89,11 @@ class Claim:
     p_success: float
     free_bye: bool
     is_qb: bool
+    add_weekly: float = 0.0
+    drop_weekly: float | None = None
+    """Both sides' rest-of-season rates, printed beside the claim. "Drop Mike
+    Evans" showed neither, so it took a synthetic reproduction rather than a
+    glance to see that it traded an 11-point receiver for a 6-point back."""
     d_title: float | None = None
     will_clear: bool = False
     reasons: list[str] = field(default_factory=list)
@@ -89,6 +102,9 @@ class Claim:
         return {
             "add": self.add_name, "position": self.position, "team": self.team,
             "drop": self.drop_name, "weekly_delta": round(self.weekly_delta, 2),
+            "add_weekly": round(self.add_weekly, 2),
+            "drop_weekly": (None if self.drop_weekly is None
+                            else round(self.drop_weekly, 2)),
             "p_success": round(self.p_success, 2),
             "d_title": None if self.d_title is None else round(self.d_title, 4),
             "will_clear": self.will_clear, "why": "; ".join(self.reasons),
@@ -189,6 +205,7 @@ def candidate_pairs(
     free_agents: pl.DataFrame,
     play_weeks: tuple[int, ...],
     max_adds: int = 40,
+    refusals: list[dict] | None = None,
 ) -> list[tuple[str, str | None, float]]:
     """Every legal (add, drop) with its weekly lineup delta, best first.
 
@@ -199,6 +216,7 @@ def candidate_pairs(
     counts: dict[str, int] = {}
     for p in my_roster["position"].to_list():
         counts[p] = counts.get(p, 0) + 1
+    surplus = {p for p, n in counts.items() if n > ROSTER_TARGETS.get(p, 0)}
 
     fa = free_agents.sort("weekly_points", descending=True, nulls_last=True).head(max_adds)
     out: list[tuple[str, str | None, float]] = []
@@ -226,13 +244,58 @@ def candidate_pairs(
                 add_row,
             ])
             d = V.weekly_delta(my_roster, after, play_weeks)
-            if d > 0:
-                out.append((add["canonical_id"], drop["canonical_id"], d))
+            if d <= 0:
+                continue
+            # ─────────────────────────────────────────────────────────────
+            # A SWAP MAY LOWER RAW TALENT ONLY IF IT BUYS AT LEAST THAT MUCH
+            # IN THE STARTING LINEUP.
+            #
+            # `weekly_delta` is the mean of my optimal starting lineup, so a
+            # player who never cracks it is worth EXACTLY ZERO — right for the
+            # add side (§9.3's bench upgrades are worth nothing), dangerous on
+            # the drop side. Reproduced on a synthetic copy of the live roster:
+            # a WR4 at 11.0/wk, fourth of four, scores 0.000 on this screen,
+            # while a 6.0/wk back who fills a STRICT RB slot in the one week two
+            # of my backs share a bye scores +0.500. Hence "drop Mike Evans for
+            # Kyle Monangai". Both numbers are correct; comparing them is not.
+            #
+            # What the screen cannot see is §3.2 — THE WIRE REFILLS. A one-week
+            # hole at RB is fillable next Tuesday; an 11-point receiver is not.
+            # It was spending a permanent asset on a transient, foreseeable
+            # need. Nor is this an availability problem: at the 2% weekly
+            # absence `availability.HEALTHY` ships, the WR4's insurance value
+            # really is a rounding error.
+            #
+            # A blunt "never drop a better player" would be wrong the other
+            # way: with a strict slot EMPTY all season and every bench player
+            # outprojecting the best option on the wire, it would leave the
+            # hole open every week. Comparing the lineup gain against the
+            # talent given up handles both, with no invented constant — a
+            # season-long hole buys a lot, a one-week one buys a sliver. The
+            # §3.6 surplus exception is the case the swap is genuinely for.
+            # ─────────────────────────────────────────────────────────────
+            gap = (drop.get("weekly_points") or 0.0) - (add.get("weekly_points") or 0.0)
+            if gap > 0 and drop["position"] not in surplus and d < gap:
+                if refusals is not None:
+                    refusals.append({
+                        "add": add.get("name") or add["canonical_id"],
+                        "add_weekly": add.get("weekly_points") or 0.0,
+                        "drop": drop.get("name") or drop["canonical_id"],
+                        "drop_weekly": drop.get("weekly_points") or 0.0,
+                        "gain": d,
+                    })
+                continue
+            out.append((add["canonical_id"], drop["canonical_id"], d,
+                        drop.get("weekly_points") or 0.0))
 
-    out.sort(key=lambda t: -t[2])
+    # Ties on the lineup delta go to CUTTING THE LEAST TALENT. Several drops are
+    # equally "free" to the screen exactly when several bench players never
+    # start — the depth-blind case above — and leaving the tie to roster order
+    # cut a 19-point QB3 ahead of an 18-point QB4.
+    out.sort(key=lambda t: (-t[2], t[3]))
     # keep only the best drop for each add — the rest are the same move, worse
     seen, best = set(), []
-    for a, d, v in out:
+    for a, d, v, _ in out:
         if a in seen:
             continue
         seen.add(a)
@@ -259,7 +322,8 @@ def build(
     notes: list[str] = []
     alarms: list[str] = []
 
-    pairs = candidate_pairs(my_roster, free_agents, play_weeks)
+    refused: list[dict] = []
+    pairs = candidate_pairs(my_roster, free_agents, play_weeks, refusals=refused)
     if not pairs:
         notes.append(
             "no free agent improves the starting lineup in any remaining week. "
@@ -331,6 +395,9 @@ def build(
             team=add.get("team") or "", drop_id=drop_id,
             drop_name=(drop or {}).get("name"), weekly_delta=wd,
             p_success=p_ok, free_bye=bool(free_bye), is_qb=pos == "QB",
+            add_weekly=float(add.get("weekly_points") or 0.0),
+            drop_weekly=(None if drop is None
+                         else float(drop.get("weekly_points") or 0.0)),
             reasons=reasons,
         ))
 
@@ -384,6 +451,25 @@ def build(
             f"a startable QB ({qb_claims[0].add_name}) is on the wire but is not "
             f"first by title delta. §9.3 says QB is where priority gets spent in a "
             f"2-QB league — worth a look before submitting."
+        )
+    if refused:
+        # One line per PROTECTED player, at the best offer refused for him —
+        # the list of refused pairs is long and repetitive, the list of people
+        # the rule kept on the roster is what the reader can check.
+        best: dict[str, dict] = {}
+        for r in refused:
+            if r["drop"] not in best or r["gain"] > best[r["drop"]]["gain"]:
+                best[r["drop"]] = r
+        top = sorted(best.values(), key=lambda r: -r["drop_weekly"])[:4]
+        notes.append(
+            "protected from trading down (a swap may lower talent only if it "
+            "buys at least that much in the starting lineup — the wire refills "
+            "a one-week hole, it does not refill a starter): "
+            + "; ".join(
+                f"{r['drop']} ({r['drop_weekly']:.1f}/wk) for {r['add']} "
+                f"({r['add_weekly']:.1f}/wk) at +{r['gain']:.2f}"
+                for r in top)
+            + ("..." if len(best) > 4 else "")
         )
     return ClaimList(
         week=week, claims=ordered, free_agent_grabs=grabs, option_value=ov,

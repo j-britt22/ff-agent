@@ -122,8 +122,10 @@ def waivers_digest(
         for i, c in enumerate(result.claims, 1):
             d = f", {c.d_title:+.2%} title" if c.d_title is not None else ""
             lines.append(
-                f"{i}. CLAIM {c.add_name} ({c.position}, {c.team})"
-                + (f" — drop {c.drop_name}" if c.drop_name else "")
+                f"{i}. CLAIM {c.add_name} ({c.position}, {c.team}, "
+                f"{c.add_weekly:.1f}/wk)"
+                + (f" — drop {c.drop_name} ({c.drop_weekly:.1f}/wk)"
+                   if c.drop_name else "")
                 + f" · +{c.weekly_delta:.2f} pts/wk{d} · {c.p_success:.0%} to win it"
             )
             lines += [f"     {r}" for r in c.reasons]
