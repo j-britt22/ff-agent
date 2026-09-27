@@ -57,6 +57,29 @@ def test_vor_uses_projected_not_realised_points(board):
     assert (recomputed - j["vor_raw"]).abs().max() < 0.02
 
 
+def test_no_player_is_projected_to_score_negative_points(board):
+    """The end-to-end pin on the symptom.
+
+    The 2026 board shipped five RBs at negative ``blended_points`` — Patrick
+    Taylor Jr. −0.01, Dean Connors −0.24, Jermar Jefferson −0.24, Gus Edwards
+    −0.30, Ja'Quinden Jackson −0.50. Four were reading a negative fitted value
+    off the deep tail of the rank->points curve; the fifth ranked past the end of
+    the curve entirely and inherited its thinnest value. Both paths are fixed in
+    ``calibration``, which is why this test asserts the outcome and
+    ``test_projections`` asserts the cause.
+
+    They are never drafted, so nothing downstream moved — the point is that a
+    projection layer able to emit an impossible number is one whose extrapolation
+    is unexamined, and it would have surfaced somewhere that mattered eventually.
+    """
+    for col in ("consensus_points", "blended_points"):
+        bad = board.filter(pl.col(col) < 0)
+        assert bad.is_empty(), (
+            f"{bad.height} players with negative {col}: "
+            f"{bad.select('name', 'position', 'ecr', col).to_dicts()}"
+        )
+
+
 def test_qb_vor_leads_rb_vor(board):
     """§3.1 called QB and RB 'near-tied'. Measured under §1 they are not."""
     best = board.group_by("position").agg(pl.col("vor").max().alias("top_vor"))

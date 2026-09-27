@@ -775,6 +775,44 @@ cannot corrupt the engine and a mid-season settings change fails loudly.
   III as top-10 QBs. Prior-season `games` and `points` are needed as role features.
 - Historical actuals are recomputed under **current** rules, deliberately opposite
   to M2 validation which uses each season's own rules.
+- **The rank->points curve went NEGATIVE in its deep tail, and the 2026 board
+  shipped five RBs projected below zero** (found 2026-08-21). A negative
+  full-season projection is impossible under §1 in practice: every negative
+  category (INT -2, sack taken -1, fumble lost -2, missed FG -1) is reachable
+  only by a player who is simultaneously accruing 0.05/carry, 0.1/yd and
+  0.5/reception. The model was NOT the culprit — `project()` already clips at
+  zero, and `model_points` was null for all five, so `blended_points` was pure
+  `consensus_points` read off the calibrated curve. **Two distinct paths:** four
+  players read a negative FITTED value (RB ranks 157-163), and one — Ja'Quinden
+  Jackson at RB166 — ranked past the end of the curve entirely and inherited the
+  tail rule's last fitted value, **-0.50**, which is the single thinnest point on
+  the whole curve.
+  - The diagnosis that makes the fix principled rather than a clamp:
+    **negatives appear only past the deepest rank that all ten seasons
+    populate** — QB 71/73, RB 143/156, WR 210/222, TE 123/129. That is a
+    selection effect, not signal. A season only produces a rank that deep if
+    some marginal player recorded a stat line at all, and the players who get
+    there are the ones whose only counted event was a lost fumble: 2025's RB150
+    and RB151 are Nyheim Hines at **-0.10** and Travis Homer at **-0.15**.
+    Averaging one or two such seasons estimates that fluke, not an expectation.
+  - Floored in `smooth_curve` — the step that produces the number — **not at the
+    end of the pipeline**, which would have hidden which step was extrapolating.
+    `expected_points` deliberately keeps the unfloored weighted mean so the
+    evidence stays checkable in the data. Out-of-range reads are now handled by
+    a named `curve_tail()`: **flat** (holding rather than extending a slope
+    fitted on one or two seasons), floored, and **flagged**
+    (`consensus_points_extrapolated`) so an extrapolated projection is
+    identifiable as one. Exactly 1 of 530 players in the 2026 pool is flagged.
+  - K and D/ST never go negative — their pools are only 32-47 deep and fully
+    supported throughout — so this touches skill positions only.
+  - **Nothing downstream moved**: M3's walk-forward gate is unchanged at 4/4 and
+    +0.0034 mean Spearman, M7's replay is still CALIBRATED, and the `board`
+    review output is byte-identical. Changes in `board.json` are confined to ten
+    bottom-of-pool players at VOR ~= -175. +4 tests, and they were checked
+    against a disabled floor to prove they are not vacuous — which caught two
+    assertions written against `MIN_EXPECTED_POINTS` itself rather than against
+    zero, so flipping the constant would have relaxed the code and its test in
+    one edit.
 
 **M9 findings:**
 - **The live loop RE-SIMULATES rather than filtering the plan, and that is
