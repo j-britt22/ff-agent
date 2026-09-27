@@ -587,6 +587,88 @@ def test_most_added_rebuilds_the_control_from_transactions():
         "espn_id": pl.Utf8, "name": pl.Utf8}), 1) is None
 
 
+def test_transactions_reads_espn_apis_real_transaction_shape(monkeypatch):
+    """espn_api's Transaction has type/status/items, not Activity's `actions`.
+    Reading `actions` returned an empty frame every week and killed the most-
+    added control and the Wednesday cleared-player check without an error.
+    Built from the library's OWN class, so a hand-made frame can't hide it."""
+    from espn_api.football.transaction import Transaction
+    from types import SimpleNamespace
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import audit as AU
+
+    teams = {1: SimpleNamespace(team_name="A"), 2: SimpleNamespace(team_name="B")}
+    names = {10: "Waiver Guy", 11: "Cut Guy", 12: "FA Guy"}
+
+    def txn(team, kind, status, items):
+        return Transaction(
+            {"teamId": team, "type": kind, "status": status, "scoringPeriodId": 3,
+             "items": [{"type": t, "playerId": p} for t, p in items]},
+            names, teams.get)
+
+    txns = [
+        txn(1, "WAIVER", "EXECUTED", [("ADD", 10), ("DROP", 11)]),
+        txn(2, "WAIVER_ERROR", "FAILED_PLAYERALREADYDROPPED", [("ADD", 10), ("DROP", 12)]),
+        txn(2, "FREEAGENT", "EXECUTED", [("ADD", 12)]),
+        txn(2, "WAIVER", "CANCELED", [("ADD", 11)]),
+    ]
+    lg = SimpleNamespace(transactions=lambda **kw: txns)
+    monkeypatch.setattr(ESPN, "get_league", lambda year: lg)
+
+    out = ESPN.transactions(2026, 3)
+    got = sorted(zip(out["action"].to_list(), out["espn_id"].to_list()))
+    assert got == [("CLAIM FAILED", "10"), ("DROPPED", "11"),
+                   ("FA ADDED", "12"), ("WAIVER ADDED", "10")]
+    assert out.filter(pl.col("espn_id") == "10")["name"].to_list() == ["Waiver Guy"] * 2
+    # a failed claim is interest, not an add: one real add each, so no tie-break
+    # by the failed one
+    adds = out.filter(pl.col("action").str.contains("ADD"))
+    assert sorted(adds["espn_id"].to_list()) == ["10", "12"]
+    assert AU.most_added(out, 3) in {"10", "12"}
+
+
+def test_weekly_results_never_hands_the_simulator_a_half_played_week(
+        monkeypatch, tmp_path):
+    """through_week was not in the cache key and `through_week or reg` read
+    week 1's 0 as "all weeks", so Thursday's partial score could reach
+    simulate(completed=) as a final result."""
+    from types import SimpleNamespace
+    from ff_agent.data import cache as C
+    from ff_agent.data import espn as ESPN
+    from ff_agent.inseason import clock as CK
+
+    monkeypatch.setattr(C, "CACHE_DIR", tmp_path)
+    monkeypatch.delenv("FF_OFFLINE", raising=False)
+
+    def box(a, b):
+        return SimpleNamespace(home_team=SimpleNamespace(team_name="A"), home_score=a,
+                               away_team=SimpleNamespace(team_name="B"), away_score=b)
+
+    scores = {1: box(100, 90), 2: box(80, 95), 3: box(12, 0)}  # week 3: Thursday only
+    fetches = []
+
+    def league(year):
+        fetches.append(year)
+        return SimpleNamespace(settings=SimpleNamespace(reg_season_count=14),
+                               box_scores=lambda wk: [scores[wk]] if wk in scores else [])
+
+    monkeypatch.setattr(ESPN, "get_league", league)
+    live = {"week": 3}
+    monkeypatch.setattr(CK, "current_week", lambda season=None, **kw: live["week"])
+
+    assert ESPN.weekly_results(2026, through_week=0).is_empty()
+    assert sorted(set(ESPN.weekly_results(2026)["week"])) == [1, 2]
+    assert sorted(set(ESPN.weekly_results(2026, through_week=2)["week"])) == [1, 2]
+    assert len(fetches) == 1, "one fetch serves every through_week"
+
+    # Tuesday: week 3 is over, but the cache is young and stops at week 2
+    scores[3] = box(110, 104)
+    live["week"] = 4
+    out = ESPN.weekly_results(2026, through_week=3)
+    assert len(fetches) == 2, "a short cache must refetch, not fail the job"
+    assert sorted(out.filter(pl.col("week") == 3)["points"].to_list()) == [104.0, 110.0]
+
+
 def test_the_season_verdict_says_UNMEASURED_rather_than_passing():
     """M7's precedent: a number with no control beside it should not be
     believed, so 'no control' must not read as success."""

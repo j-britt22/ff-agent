@@ -21,7 +21,7 @@ from ff_agent.config import (
     ARTIFACTS_DIR, MissingCredentials, SEASON, espn_credentials,
     normalize_team_name,
 )
-from ff_agent.data.cache import cached
+from ff_agent.data.cache import _offline_default, cached
 
 
 class ESPNAuthError(RuntimeError):
@@ -499,11 +499,23 @@ def weekly_results(year: int = SEASON, through_week: int | None = None, **kw) ->
     this season, so this is what stops it being one. Only weeks with a real,
     non-zero score are returned: ESPN reports an unplayed matchup as 0-0, and
     feeding that in as a result would hand every team a shutout.
+
+    The cache holds FINISHED weeks only, and ``through_week`` is applied after
+    it. Both used to live inside the fetch: ``through_week`` was not part of the
+    cache key, so whichever caller fetched first decided what everybody got for
+    six hours, and ``through_week or reg`` read week 1's ``0`` as "all weeks".
+    Either way a half-played week — Thursday's game in, Sunday's not — reached
+    ``simulate(completed=)`` as a final result. "Finished" is ``clock.
+    current_week``'s definition (last kickoff + tail), the same one
+    ``state.load`` picks the week with, so the two agree by construction.
     """
     def fetch() -> pl.DataFrame:
+        from ff_agent.inseason import clock as CK
+
         lg = get_league(year)
         reg = int(getattr(getattr(lg, "settings", None), "reg_season_count", 14))
-        last = min(through_week or reg, reg)
+        live = CK.current_week(year)            # None once the season is over
+        last = reg if live is None else min(live - 1, reg)
         rows = []
         for wk in range(1, last + 1):
             try:
@@ -530,7 +542,20 @@ def weekly_results(year: int = SEASON, through_week: int | None = None, **kw) ->
         )
         return df.filter(pl.col("week").is_in(played)).unique(subset=["week", "team"])
 
-    return cached("espn_results", fetch, season=year, source="espn", **kw)
+    df = cached("espn_results", fetch, season=year, source="espn", **kw)
+    if through_week is None:
+        return df
+    # A cache from before the last week finished is young but short. Refetch
+    # once rather than fail the job; offline, state.load's coverage assert
+    # still says so loudly.
+    have = set(df["week"].to_list()) if df.height else set()
+    offline = kw.get("offline")
+    offline = _offline_default() if offline is None else offline
+    if (through_week >= 1 and through_week not in have
+            and not offline and not kw.get("force")):
+        df = cached("espn_results", fetch, season=year, source="espn",
+                    **{**kw, "force": True})
+    return df.filter(pl.col("week") <= through_week)
 
 
 def started_lineup(year: int, week: int) -> pl.DataFrame:
@@ -554,6 +579,9 @@ def started_lineup(year: int, week: int) -> pl.DataFrame:
                     "week": week, "fantasy_team": name,
                     "espn_id": str(getattr(p, "playerId", "") or ""),
                     "name": _scalar(getattr(p, "name", None)),
+                    # the PLAYER's position; slot_position is where he sat
+                    # (BE, IR, RB/WR/TE) and is not a position at all
+                    "position": _scalar(getattr(p, "position", None)),
                     "slot_position": _scalar(getattr(p, "slot_position", None)),
                     "points": _scalar(getattr(p, "points", None), float),
                     "projected_points": _scalar(getattr(p, "projected_points", None), float),
@@ -579,23 +607,45 @@ def transactions(year: int, scoring_period: int | None = None) -> pl.DataFrame:
         )
     except Exception as exc:
         raise ESPNUnavailable(f"transactions({scoring_period}) failed: {exc}") from exc
+    # espn_api's Transaction is NOT recent_activity()'s Activity: it has no
+    # `actions`. It carries `type` (FREEAGENT/WAIVER/WAIVER_ERROR), `status` and
+    # `items`, each item an ADD or DROP with `playerId` and `player` (a NAME
+    # string from player_map). Reading `actions` returned an empty frame for
+    # every week, silently. Actions keep Activity's vocabulary ("WAIVER ADDED",
+    # "FA ADDED", "DROPPED") because consumers match on "ADD" — so a failed claim
+    # must NOT contain it: somebody wanting a player is not somebody getting him.
+    verbs = {"ADD": "ADDED", "DROP": "DROPPED"}
     rows = []
     for t in txns or []:
-        for action in getattr(t, "actions", []) or []:
-            team, verb, player = (list(action) + [None, None, None])[:3]
+        status = str(getattr(t, "status", "") or "")
+        if status in {"CANCELED", "PENDING"}:
+            continue                           # never happened
+        failed = t.type == "WAIVER_ERROR" or status.startswith("FAILED")
+        team = getattr(t, "team", None)
+        for item in getattr(t, "items", []) or []:
+            if failed:
+                if item.type != "ADD":
+                    continue                   # a failed claim's drop never ran
+                action = "CLAIM FAILED"
+            else:
+                verb = verbs.get(item.type)
+                if verb is None:
+                    continue
+                action = verb if verb == "DROPPED" else (
+                    f"{'WAIVER' if t.type == 'WAIVER' else 'FA'} {verb}")
+            name = getattr(item, "player", None)
             rows.append({
-                "scoring_period": scoring_period,
+                "scoring_period": getattr(t, "scoring_period", scoring_period),
                 "fantasy_team": normalize_team_name(getattr(team, "team_name", None))
                 if team else None,
-                "action": verb,
-                "espn_id": str(getattr(player, "playerId", "") or "") or None,
-                "name": getattr(player, "name", None) if player else None,
+                "action": action,
+                "status": status or None,
+                "espn_id": str(item.playerId) if item.playerId is not None else None,
+                "name": name if isinstance(name, str) and name != "Unknown" else None,
             })
-    if not rows:
-        return pl.DataFrame(schema={
-            "scoring_period": pl.Int64, "fantasy_team": pl.Utf8,
-            "action": pl.Utf8, "espn_id": pl.Utf8, "name": pl.Utf8})
-    return pl.DataFrame(rows)
+    schema = {"scoring_period": pl.Int64, "fantasy_team": pl.Utf8, "action": pl.Utf8,
+              "status": pl.Utf8, "espn_id": pl.Utf8, "name": pl.Utf8}
+    return pl.DataFrame(rows, schema=schema)
 
 
 def roster_week(year: int, week: int) -> pl.DataFrame:

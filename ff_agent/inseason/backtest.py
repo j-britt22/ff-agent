@@ -144,6 +144,9 @@ def lineup_arm(weeks: list[dict]) -> ArmResult:
     for wk in weeks:
         pts = wk["actual_points"]
         roster = wk["roster"]
+        if ("weekly_points" not in roster.columns
+                or roster["weekly_points"].null_count() == roster.height):
+            continue            # no projection of ours this week: unmeasured
         our_start = LN.LU.optimal_lineup(roster)["canonical_id"].to_list()
         espn_start = LN.LU.optimal_lineup(
             roster, value="espn_projection"
@@ -154,6 +157,10 @@ def lineup_arm(weeks: list[dict]) -> ArmResult:
     return ArmResult(
         "lineup", n, ours / max(n, 1), control / max(n, 1),
         "ESPN's own projection-optimal lineup",
+        notes=[] if n or not weeks else [
+            "no week carried our own projection — the replay has to run the "
+            "engine for that; ESPN's number is only the control."
+        ],
     )
 
 
@@ -281,11 +288,18 @@ def load_season(
             ~pl.col("slot_position").is_in(["BE", "IR"])
         )["espn_id"].to_list()
 
+        # Position is the PLAYER's, never slot_position: a bench player's slot
+        # is "BE", so solving on slots could never start anybody who sat and
+        # could not fill FLEX or D/ST. And ESPN's number is the CONTROL only —
+        # our own weekly_points come from a replay that runs the engine; filled
+        # from ESPN, ours and control were the same column and the arm read a
+        # measured edge of exactly zero.
+        from ff_agent.inseason.freeagents import normalize_position
+
         roster = mine.select(
             pl.col("espn_id").alias("canonical_id"),
             pl.col("name"),
-            pl.col("slot_position").alias("position"),
-            pl.col("projected_points").fill_null(0.0).alias("weekly_points"),
+            pl.col("position").map_elements(normalize_position, return_dtype=pl.Utf8),
             pl.col("projected_points").fill_null(0.0).alias("espn_projection"),
         )
         lineup_weeks.append({

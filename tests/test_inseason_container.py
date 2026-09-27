@@ -2,6 +2,7 @@
 import re
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from ff_agent.inseason import backtest as B
@@ -138,6 +139,48 @@ def test_the_thursday_arm_exists_because_it_justifies_the_machinery():
     assert arm.ours == pytest.approx(13.5)
     assert arm.control == pytest.approx(11.5)
     assert arm.verdict == "BEATS CONTROL"
+
+
+def test_the_lineup_replay_solves_on_positions_and_never_fakes_our_projection(monkeypatch):
+    """Two bugs, one path. load_season used slot_position AS position, so a
+    benched player ("BE") could never be started and FLEX/D-ST could never be
+    filled; and it filled OUR projection from ESPN's, so ours and the control
+    were one column and the arm read a measured edge of exactly zero."""
+    from ff_agent.config import MY_TEAM_NAME
+    from ff_agent.data import espn as ESPN
+
+    rows = [  # (id, position, slot, espn proj, actual)
+        ("q1", "QB", "QB", 20, 20), ("q2", "QB", "QB", 18, 18),
+        ("r1", "RB", "RB", 15, 10), ("r2", "RB", "RB", 14, 9),
+        ("r3", "RB", "BE", 6, 30),                     # the one who should start
+        ("w1", "WR", "WR", 13, 12), ("w2", "WR", "WR", 12, 11),
+        ("w3", "WR", "RB/WR/TE", 11, 8),
+        ("t1", "TE", "TE", 9, 7), ("k1", "K", "K", 8, 8),
+        ("d1", "D/ST", "D/ST", 7, 5),
+    ]
+    box = pl.DataFrame([
+        {"week": 4, "fantasy_team": MY_TEAM_NAME, "espn_id": i, "name": i,
+         "position": p, "slot_position": s, "points": float(a),
+         "projected_points": float(e)} for i, p, s, e, a in rows])
+    monkeypatch.setattr(ESPN, "started_lineup", lambda season, wk: box)
+    monkeypatch.setattr(ESPN, "transactions", lambda season, wk: pl.DataFrame())
+
+    data = B.load_season(2025, (4,))
+    roster = data["lineup_weeks"][0]["roster"]
+    assert set(roster["position"]) == {"QB", "RB", "WR", "TE", "K", "DST"}
+    assert "weekly_points" not in roster.columns, "ours must never be ESPN's"
+    assert B.lineup_arm(data["lineup_weeks"]).verdict == "UNMEASURED"
+
+    # once a replay supplies our number, the bench RB can be started
+    wk = dict(data["lineup_weeks"][0])
+    wk["roster"] = roster.with_columns(
+        pl.col("canonical_id").replace_strict(
+            {i: float(a) for i, _, _, _, a in rows}).alias("weekly_points"))
+    arm = B.lineup_arm([wk])
+    assert arm.n == 1
+    assert "r3" in B.LN.LU.optimal_lineup(wk["roster"])["canonical_id"].to_list()
+    assert B.LN.LU.optimal_lineup(wk["roster"]).height == 10   # FLEX and DST filled
+    assert arm.ours > arm.control
 
 
 def test_an_unmeasured_arm_says_so_rather_than_passing_quietly():
