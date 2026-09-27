@@ -43,6 +43,8 @@ artifacts/scenario_offsets.npz
 artifacts/opponents.json
 artifacts/season_sim.json
 artifacts/draft_sim.json
+artifacts/postdraft.json
+artifacts/postdraft_picks.csv
 artifacts/*.pdf
 
 # ─── Logs (§10 requires recommendation logs; keep them local) ────────────────
