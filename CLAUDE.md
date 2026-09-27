@@ -527,6 +527,31 @@ docker compose -f docker/compose.yml up -d --build
   17-game projection — "projected for 17 games, scored nothing in 8" — and the
   anchor correctly answered that all 187 points were still to come, at nearly
   double the rate. Two tests failed for the right reason.
+- **THE LINEUP SCREEN PRICES A NON-STARTER AT EXACTLY ZERO — right for the
+  add, dangerous for the drop.** Found live the run after the season anchor
+  shipped: "CLAIM Kyle Monangai — drop Mike Evans · +0.20 pts/wk". Reproduced
+  synthetically: a WR4 at 11.0/wk, fourth of four, scores **0.000** on
+  `weekly_delta`, while a 6.0/wk back filling a STRICT RB slot in the one week
+  two starters share a bye scores **+0.500**. Both numbers are correct; comparing
+  them is not. The screen cannot see §3.2 — **the wire refills a one-week hole;
+  it does not refill a starter** — so it was spending a permanent asset on a
+  transient, foreseeable need. NOT an availability problem: at the 2% weekly
+  absence `availability.HEALTHY` ships, the WR4's insurance value really is a
+  rounding error. Resolution: **a swap may lower raw talent only if it buys at
+  least that much in the starting lineup** (gain ≥ talent gap, no invented
+  constant), with §3.6's upper bounds as the surplus exception so a fourth QB
+  can still be cashed in. A blunt "never drop a better player" was rejected
+  because it fails the other way: with a strict slot EMPTY all season and every
+  bench player outprojecting the wire, it leaves the hole open every week — a
+  season-long hole buys +6.4/wk, easily enough; a one-week hole buys a sliver.
+  Protected players are named in the digest, and every claim now prints both
+  sides' rest-of-season rates so a trade-down is visible at a glance.
+- **Ties on the lineup delta fell to ROSTER ORDER, and a test had pinned it.**
+  Several drops are equally "free" exactly when several bench players never
+  start — the depth-blind case above. `test_add_and_drop_are_scored_as_one_action`
+  asserted RB3 (9.0/wk, the roster's ONLY running-back backup) over a 4.0/wk
+  bench receiver at an exact tie of +3.062. Ties now cut the least talent, and
+  of two surplus QBs the worse one goes.
 
 **`ros.MODEL_WEIGHT` ships at 0.0.** M3's fitted 0.12 was fitted for preseason
 season-long projections scored on rank correlation; carrying it to an in-season

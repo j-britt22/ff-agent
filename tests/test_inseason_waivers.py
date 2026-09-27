@@ -68,10 +68,18 @@ def test_a_player_who_never_starts_is_worth_exactly_nothing():
 
 def test_add_and_drop_are_scored_as_one_action():
     """The dropped player's own remaining starts are the cost, so the engine
-    picks WHICH drop, not just whether to add."""
+    picks WHICH drop, not just whether to add.
+
+    This test used to assert RB3 — and was pinning a TIE-BREAK, not a decision.
+    Neither RB3 (9.0/wk) nor the bench WR (4.0/wk) ever starts, so both drops
+    are worth exactly +3.062 to the lineup screen, and roster order picked RB3:
+    the better player, and the roster's ONLY running-back backup. Ties now go
+    to cutting the least talent. Same class as M7's `/16`, which survived
+    because a test had pinned the wrong answer."""
     c = build().claims[0]
     assert c.drop_id is not None
-    assert c.drop_name == "RB3"        # the worst startable body, not the bench
+    assert c.drop_name == "Bench"
+    assert c.drop_weekly == 4.0
 
 
 def test_a_drop_that_breaks_the_starting_lineup_is_never_proposed():
@@ -235,3 +243,94 @@ def test_a_miss_costs_the_same_at_any_distance():
     assert (near.total - near_miss.total) == pytest.approx(
         (far.total - far_miss.total) - 2 * 0.5 * (6 - 3)
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A swap may lower raw talent only if it buys at least that much in the lineup.
+#
+# Found live, week 1 of 2026: "CLAIM Kyle Monangai — drop Mike Evans · +0.20
+# pts/wk". The lineup screen prices a player who never starts at EXACTLY zero,
+# so a good fourth receiver was free to cut, while a marginal back who filled a
+# strict RB slot in the single week two starters share a bye scored above zero.
+# The wire refills a one-week hole; it does not refill a starter.
+# ─────────────────────────────────────────────────────────────────────────────
+SEASON_WEEKS = tuple(w for w in range(1, 15) if w not in (5, 14))
+
+
+def _frame(rows) -> pl.DataFrame:
+    return pl.DataFrame(
+        [{"canonical_id": c, "name": n, "position": p, "team": "XX",
+          "weekly_points": v, "bye_week": b} for c, n, p, v, b in rows],
+        schema_overrides={"bye_week": pl.Int64})
+
+
+# RB1 and RB2 share a bye in week 6: a hole at a STRICT RB slot that no
+# receiver can fill. Mike Evans is fourth of four receivers and never starts.
+_CORE = [
+    ("q1", "QB1", "QB", 24.0, 0), ("q2", "QB2", "QB", 22.0, 0),
+    ("r1", "RB1", "RB", 20.0, 6), ("r2", "RB2", "RB", 14.0, 6),
+    ("r3", "RB3", "RB", 13.0, 9),
+    ("w1", "WR1", "WR", 13.0, 0), ("w2", "WR2", "WR", 12.0, 0),
+    ("w3", "WR3", "WR", 11.5, 0), ("w4", "Mike Evans", "WR", 11.0, 0),
+    ("k1", "K1", "K", 8.0, 0), ("d1", "DST1", "DST", 7.0, 0),
+]
+_TE = [("t1", "TE1", "TE", 10.0, 0)]
+_PATCH = [("fa", "Kyle Monangai", "RB", 6.0, 11)]
+
+
+def test_the_screen_really_does_price_a_non_starter_at_zero():
+    """The mechanism, pinned. If this ever stops being true the guard below is
+    guarding a problem that no longer exists — and should be revisited."""
+    from ff_agent.inseason import value as V
+    mine = _frame(_CORE + _TE)
+    without = mine.filter(pl.col("canonical_id") != "w4")
+    assert V.weekly_delta(mine, without, SEASON_WEEKS) == 0.0
+
+
+def test_a_starter_is_never_traded_for_a_one_week_patch():
+    """The Mike Evans claim. The patch is worth +0.50 a week to the lineup
+    screen and costs a receiver five points a week better than him."""
+    refused = []
+    pairs = W.candidate_pairs(_frame(_CORE + _TE), _frame(_PATCH), SEASON_WEEKS,
+                              refusals=refused)
+    assert all(drop != "w4" for _, drop, _ in pairs)
+    assert "Mike Evans" in {r["drop"] for r in refused}
+
+
+def test_a_season_long_hole_still_buys_a_better_player():
+    """The other direction. With NO tight end at all, every week has an empty
+    strict slot, and the best TE on the wire is worse than every bench player.
+    A blunt "never drop a better player" would leave the slot empty all season;
+    +6.4 a week in the lineup buys the 4-point talent gap easily."""
+    pairs = W.candidate_pairs(_frame(_CORE), _frame([("te", "Wire TE", "TE", 7.0, 11)]),
+                              SEASON_WEEKS)
+    assert pairs and pairs[0][0] == "te"
+    assert pairs[0][2] > 4.0
+
+
+def test_a_surplus_quarterback_can_be_cashed_in_and_it_is_the_worse_one():
+    """§3.6 wants three quarterbacks and M8 measured cap 3 over cap 4 on
+    P(title), so a fourth is surplus even though he outprojects the add. And of
+    two surplus QBs who never start, the one cut is the WORSE — the tie on the
+    lineup delta used to fall to roster order and cut QB3 ahead of QB4."""
+    mine = _frame(_CORE + _TE + [("q3", "QB3", "QB", 19.0, 0),
+                                 ("q4", "QB4", "QB", 18.0, 0)])
+    pairs = W.candidate_pairs(mine, _frame(_PATCH), SEASON_WEEKS)
+    assert pairs == [("fa", "q4", pytest.approx(0.5))]
+
+
+def test_the_protected_player_is_named_and_both_prices_are_shown():
+    """"Drop Mike Evans" showed neither player's value, which is why it took a
+    reproduction rather than a glance to see what was wrong with it."""
+    out = W.build(my_roster=_frame(_CORE + _TE), free_agents=_frame(_PATCH),
+                  play_weeks=SEASON_WEEKS, week=1)
+    assert not out.claims
+    assert any("Mike Evans (11.0/wk)" in n and "Kyle Monangai (6.0/wk)" in n
+               for n in out.notes), out.notes
+
+    te_hole = W.build(my_roster=_frame(_CORE),
+                      free_agents=_frame([("te", "Wire TE", "TE", 7.0, 11)]),
+                      play_weeks=SEASON_WEEKS, week=1)
+    c = te_hole.claims[0]
+    assert (c.add_weekly, c.drop_weekly) == (7.0, 11.0)
+    assert c.summary()["drop_weekly"] == 11.0
