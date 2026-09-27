@@ -350,6 +350,12 @@ def build(
     r = attach_locks(this_week_value(roster), week, kickoffs, now)
     r = AV.attach(r, injuries)
     pins = pins_from_espn(r)
+    # ESPN locks the SLOT at kickoff, not just the player: someone whose game
+    # started while he sat on my bench is spent on the bench. Only open players
+    # and the locked starters can occupy a slot, so every valuation and the final
+    # lineup solve over those. Solving over `r` let a Thursday bench player be
+    # "started" on Sunday and priced as a Sunday fill-in for commit-or-wait.
+    live = r.filter(~pl.col("locked") | pl.col("canonical_id").is_in(list(pins)))
 
     alarms: list[str] = []
     notes: list[str] = []
@@ -403,7 +409,7 @@ def build(
     ordered = early.sort("weekly_points", descending=True, nulls_last=True)
     for row in ordered.iter_rows(named=True):
         cid = row["canonical_id"]
-        bench_v = commitment_value(r, working_pins, {cid}, n_draws, seed)
+        bench_v = commitment_value(live, working_pins, {cid}, n_draws, seed)
         best_slot = _best_slot_for(r, cid, working_pins)
         if best_slot is None:
             # No RB/FLEX capacity left once higher-value same-window players
@@ -422,7 +428,7 @@ def build(
             ))
             continue
         start_v = commitment_value(
-            r, {**working_pins, cid: best_slot}, None, n_draws, seed)
+            live, {**working_pins, cid: best_slot}, None, n_draws, seed)
         d = Decision(
             canonical_id=cid, name=row.get("name") or cid,
             position=row["position"], team=row.get("team") or "",
@@ -437,7 +443,7 @@ def build(
 
     final_pins = working_pins
 
-    playable = r.filter(pl.col("plays_this_week"))
+    playable = live.filter(pl.col("plays_this_week"))
     lu = LU.optimal_lineup(
         playable.with_columns(
             (pl.col("weekly_points") * (1 - pl.col("p_out"))).alias("_ev")

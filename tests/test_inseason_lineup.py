@@ -174,6 +174,25 @@ def test_locked_slots_are_carried_and_never_re_decided(kickoffs):
     assert all(d.canonical_id != "thu" for d in plan.decisions)
 
 
+def test_a_player_locked_on_the_bench_is_spent_on_the_bench(kickoffs):
+    """ESPN locks the SLOT at kickoff. A Thursday player who kicked off from my
+    bench can neither be "started" on Sunday nor count as a Sunday fill-in when
+    pricing commit-or-wait — so every Sunday call must come out exactly as if he
+    were not on the roster at all."""
+    r = roster(30.0).with_columns(
+        pl.when(pl.col("canonical_id") == "thu").then(pl.lit("BE"))
+        .otherwise(pl.lit(None, dtype=pl.Utf8)).alias("lineup_slot"))
+    plan = L.build(r, 7, kickoffs, FRIDAY)
+    assert "thu" not in plan.starters["canonical_id"].to_list()
+    assert "thu" in plan.bench["canonical_id"].to_list()
+
+    without = L.build(r.filter(pl.col("canonical_id") != "thu"), 7, kickoffs, FRIDAY)
+    key = lambda p: [(d.canonical_id, d.slot, round(d.start_value, 6),
+                      round(d.bench_value, 6)) for d in p.decisions]
+    assert key(plan) == key(without)
+    assert sorted(plan.starters["canonical_id"]) == sorted(without.starters["canonical_id"])
+
+
 def test_the_plan_reports_the_next_deadline(kickoffs):
     """Every email leads with this."""
     plan = L.build(roster(), 7, kickoffs, WEDNESDAY)
